@@ -354,3 +354,54 @@ func TestABareWordRowDoesNotCatchANamespacedRegistryTag(t *testing.T) {
 		t.Fatal("the fallback should still place a spelling the registry lacks:", got)
 	}
 }
+func TestARegistryMayDeclareItsOwnNamespaces(t *testing.T) {
+	// Eight namespaces were compiled into two tools and a stylesheet. A library
+	// of something other than hypnosis recordings needs different ones, and this
+	// is the declaration that gives it them.
+	data := Record{
+		"namespaces": []any{
+			Record{"key": "voice", "prefix": "Voice", "label": "Voice"},
+			Record{"key": "setting", "prefix": "Setting", "label": "Settings",
+				"note": "where it takes place", "colour": "#445566"},
+			Record{"key": "warning", "prefix": "Warning", "label": "Warnings", "spoiler": true},
+			Record{"key": "subject", "label": "Subject"},
+		},
+		"voice":   Record{"fem": "Feminine."},
+		"setting": Record{"Forest": "Among trees."},
+		"warning": Record{"Drowning": "Someone drowns."},
+		"subject": Record{"Rain": "Rain."},
+	}
+	r := NewRegistry(data)
+	if len(r.Kinds) != 4 {
+		t.Fatal("the registry's own namespaces were ignored:", r.Kinds)
+	}
+	for tag, want := range map[string]string{
+		"Setting: Forest":   "setting",
+		"Warning: Drowning": "warning",
+		"Rain":              "subject", // the unprefixed namespace, whatever it is called
+		"Voice: fem":        "voice",
+	} {
+		if got := r.KindOf(tag); got != want {
+			t.Fatalf("%s filed under %q, want %q", tag, got, want)
+		}
+	}
+	// And it resolves, which a ninth block never did before: an unknown prefix
+	// used to be filed under content and rendered as an ordinary tag.
+	if got, why := r.Resolve("Setting: Forest", nil); got != "Setting: Forest" || why != "registry" {
+		t.Fatalf("a declared namespace did not resolve: %q %q", got, why)
+	}
+	spoilers := []string{}
+	for _, k := range r.Kinds {
+		if k.Spoiler {
+			spoilers = append(spoilers, k.Key)
+		}
+	}
+	if !equivalent(spoilers, []string{"warning"}) {
+		t.Fatal("the spoiler flag did not survive:", spoilers)
+	}
+	// A registry that declares nothing keeps the eight, because every library
+	// written before this one does.
+	if len(NewRegistry(Record{"content": Record{"X": "y"}}).Kinds) != len(TagKinds) {
+		t.Fatal("a registry with no declaration lost the built-in namespaces")
+	}
+}

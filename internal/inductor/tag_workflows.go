@@ -528,7 +528,7 @@ func AdoptTagmaps(c Config, authors []string, write bool) ([]Record, error) {
 			if name == "" || meaning == "" || reg.Spelling[Fold(name)] != "" {
 				continue
 			}
-			kind := TagKindOf(name)
+			kind := reg.KindOf(name)
 			if _, ok := reg.Data[kind]; !ok {
 				return nil, fmt.Errorf("no %q block in registry", kind)
 			}

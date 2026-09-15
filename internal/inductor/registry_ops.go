@@ -75,13 +75,13 @@ func (e *tagEdit) retarget(from, to string) {
 // so what is refused is specifically a prefix that is not one of the eight.
 func placeIn(reg *Registry, name string) (string, string, error) {
 	prefix, bare := SplitTag(name)
-	kind := TagKindOf(name)
+	kind := reg.KindOf(name)
 	key := name
-	if p := tagPrefix(kind); p != "" && p == prefix {
+	if p := reg.PrefixOf(kind); p != "" && p == prefix {
 		key = bare
-	} else if prefix != "" && kind == "content" {
+	} else if prefix != "" && kind == reg.ContentKey() {
 		known := []string{}
-		for _, k := range TagKinds {
+		for _, k := range reg.Kinds {
 			if k.Prefix != "" {
 				known = append(known, k.Prefix+":")
 			}
@@ -253,7 +253,7 @@ func RegistryAbout(c Config, namespace, about string, write bool) (Record, error
 	}
 	key := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(namespace, ":")))
 	known := []string{}
-	for _, k := range TagKinds {
+	for _, k := range reg.Kinds {
 		known = append(known, k.Key)
 	}
 	if !contains(known, key) {

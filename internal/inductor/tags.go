@@ -13,9 +13,54 @@ import (
 type TagKind struct {
 	Key, Prefix, Label string
 	Spoiler            bool
+	// Note is the line shown beside the section on the site; Light and Dark are
+	// the colour its chips take. Empty means the site falls back to its own.
+	Note        string
+	Light, Dark string
 }
 
-var TagKinds = []TagKind{{"voice", "Voice", "Voice", false}, {"audience", "Audience", "Audience", false}, {"induction", "Induction", "Induction", false}, {"production", "Production", "Production", false}, {"trigger", "Trigger", "Triggers", true}, {"compulsion", "Compulsion", "Compulsions", true}, {"cw", "CW", "Content warnings", false}, {"content", "", "Content", false}}
+// TagKinds is the vocabulary's shape when a registry does not declare its own:
+// eight namespaces, in the order a reader meets them. A registry may replace
+// this with a `namespaces:` list of the same shape -- see `Namespaces`.
+var TagKinds = []TagKind{{"voice", "Voice", "Voice", false, "how the speaker presents", "#8a3f86", "#dda3d6"}, {"audience", "Audience", "Audience", false, "who it speaks to", "#1f6f85", "#6cc2d6"}, {"induction", "Induction", "Induction", false, "how trance is brought on", "#35619f", "#8fb3e8"}, {"production", "Production", "Production", false, "how the audio was made", "#4f7042", "#a6c890"}, {"trigger", "Trigger", "Triggers", true, "cues it installs", "#9c6612", "#e2b459"}, {"compulsion", "Compulsion", "Compulsions", true, "drives it leaves behind", "#8f4520", "#e2946e"}, {"cw", "CW", "Content warnings", false, "touched on, not the subject", "#a8323f", "#f28c8c"}, {"content", "", "Content", false, "what happens in it", "#6b5c63", "#a2919a"}}
+
+// Namespaces reads a registry's own `namespaces:` list, or answers with the
+// built-in eight.
+//
+// The eight were compiled into both tools and into the site's stylesheet, in
+// four separate lists, which made "add a namespace" a change to two public
+// repositories rather than to a library. Worse, it failed quietly: an
+// unrecognised prefix is filed under content and renders as an ordinary tag, so
+// a ninth block resolved perfectly and simply never became a section.
+//
+// A registry that declares none keeps the eight exactly as they were, because
+// every library written before this one does.
+func Namespaces(data Record) []TagKind {
+	rows := array(data["namespaces"])
+	if len(rows) == 0 {
+		return TagKinds
+	}
+	out := []TagKind{}
+	for _, v := range rows {
+		r := record(v)
+		key := strings.TrimSpace(str(r["key"]))
+		if key == "" {
+			continue
+		}
+		k := TagKind{Key: key, Prefix: strings.TrimSpace(str(r["prefix"])),
+			Label: strings.TrimSpace(str(r["label"])), Spoiler: truth(r["spoiler"]),
+			Note:  strings.TrimSpace(str(r["note"])),
+			Light: strings.TrimSpace(str(r["colour"])), Dark: strings.TrimSpace(str(r["dark"]))}
+		if k.Label == "" {
+			k.Label = strings.ToUpper(key[:1]) + key[1:]
+		}
+		out = append(out, k)
+	}
+	if len(out) == 0 {
+		return TagKinds
+	}
+	return out
+}
 
 func sortStrings(s []string) { sort.Strings(s) }
 func SplitTag(t string) (string, string) {
@@ -25,17 +70,17 @@ func SplitTag(t string) (string, string) {
 	}
 	return strings.TrimSpace(p), strings.TrimSpace(v)
 }
-func TagKindOf(t string) string {
+func kindOf(kinds []TagKind, t string) string {
 	p, _ := SplitTag(t)
-	for _, k := range TagKinds {
+	for _, k := range kinds {
 		if k.Prefix == p {
 			return k.Key
 		}
 	}
-	return "content"
+	return contentKey(kinds)
 }
-func tagPrefix(key string) string {
-	for _, k := range TagKinds {
+func prefixOf(kinds []TagKind, key string) string {
+	for _, k := range kinds {
 		if k.Key == key {
 			return k.Prefix
 		}
@@ -43,8 +88,27 @@ func tagPrefix(key string) string {
 	return ""
 }
 
+// contentKey is the namespace a tag with no recognised prefix belongs to: the
+// one declared without a prefix. A registry that declares none has no home for
+// an unprefixed tag, so "content" is the fallback rather than an assumption.
+func contentKey(kinds []TagKind) string {
+	for _, k := range kinds {
+		if k.Prefix == "" {
+			return k.Key
+		}
+	}
+	return "content"
+}
+
+func TagKindOf(t string) string              { return kindOf(TagKinds, t) }
+func tagPrefix(key string) string            { return prefixOf(TagKinds, key) }
+func (r *Registry) KindOf(t string) string   { return kindOf(r.Kinds, t) }
+func (r *Registry) PrefixOf(k string) string { return prefixOf(r.Kinds, k) }
+func (r *Registry) ContentKey() string       { return contentKey(r.Kinds) }
+
 type Registry struct {
 	Data     Record
+	Kinds    []TagKind
 	Spelling map[string]string
 	Meanings map[string]string
 }
@@ -57,11 +121,12 @@ func LoadRegistry(path string) (*Registry, error) {
 	return NewRegistry(r), nil
 }
 func NewRegistry(data Record) *Registry {
-	r := &Registry{Data: data, Spelling: map[string]string{}, Meanings: map[string]string{}}
+	r := &Registry{Data: data, Kinds: Namespaces(data),
+		Spelling: map[string]string{}, Meanings: map[string]string{}}
 	bare := map[string][]string{}
 	for _, key := range sortedKeys(data) {
 		entries := record(data[key])
-		prefix := tagPrefix(key)
+		prefix := r.PrefixOf(key)
 		for _, name := range sortedKeys(entries) {
 			if name == "_about" {
 				continue
@@ -85,7 +150,7 @@ func NewRegistry(data Record) *Registry {
 func (r *Registry) Has(tag string) bool { _, ok := r.Meanings[tag]; return ok }
 func (r *Registry) Block() string {
 	var lines []string
-	for _, kind := range TagKinds {
+	for _, kind := range r.Kinds {
 		entries := record(r.Data[kind.Key])
 		if len(entries) == 0 {
 			continue
@@ -195,11 +260,11 @@ func (r *Registry) Retag(tags []string, mapping Record) ([]string, []string) {
 	}
 	out = uniqueStrings(out)
 	order := map[string]int{}
-	for i, k := range TagKinds {
+	for i, k := range r.Kinds {
 		order[k.Key] = i
 	}
 	sort.SliceStable(out, func(i, j int) bool {
-		a, b := TagKindOf(out[i]), TagKindOf(out[j])
+		a, b := r.KindOf(out[i]), r.KindOf(out[j])
 		if order[a] != order[b] {
 			return order[a] < order[b]
 		}
