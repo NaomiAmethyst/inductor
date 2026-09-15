@@ -168,3 +168,41 @@ func TestGraphRunsCachedWorkAndBlocksFailedDependencies(t *testing.T) {
 		t.Fatal("required failure did not block descendants", report, err)
 	}
 }
+func TestEmbeddingDependenciesWaitForAnEmbeddingJob(t *testing.T) {
+	c := testConfig(t)
+	box := NewGPUBox(c, "")
+	if err := box.Provision(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	// Torch and speechbrain are gigabytes and only an embedding job loads them.
+	// Demanding them up front once refused 43 transcriptions on a box whose
+	// faster-whisper was working perfectly well.
+	asked := []string{}
+	box.install = func(mods, pkgs string) string {
+		asked = append(asked, mods)
+		return "true"
+	}
+	audio := filepath.Join(c.Root, "a.mp3")
+	putFile(t, audio, []byte("audio"))
+	landing := filepath.Join(c.Cache, "landing")
+	if err := writeJSON(filepath.Join(box.Directory, "out", "t.json"),
+		Record{"id": "t", "kind": "transcribe", "ok": true, "result": Record{"text": "hi"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := box.Work(context.Background(), "t", "transcribe", audio, landing); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 0 {
+		t.Fatal("a transcription waited on the embedding dependencies:", asked)
+	}
+	if err := writeJSON(filepath.Join(box.Directory, "out", "e.json"),
+		Record{"id": "e", "kind": "embed", "ok": true, "result": Record{"vector": []any{1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := box.Work(context.Background(), "e", "embed", audio, landing); err != nil {
+		t.Fatal(err)
+	}
+	if len(asked) != 1 || !strings.Contains(asked[0], "speechbrain") {
+		t.Fatal("an embedding job did not provision what it needs:", asked)
+	}
+}

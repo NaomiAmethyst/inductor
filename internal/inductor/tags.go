@@ -578,6 +578,11 @@ func ApplyRulings(c Config, rulings []any, write bool) (Record, error) {
 		report["removed"] = integer(report["removed"]) + len(dropped)
 		changes = append(changes, d)
 	}
+	maps, e := retireRuled(c, reg, decided, reasons(rulings), write)
+	if e != nil {
+		return report, e
+	}
+	report["maps"] = maps
 	if write {
 		if len(array(report["registry"])) > 0 {
 			if _, e = SaveDocument(c.RegistryPath(), reg.Data); e != nil {
@@ -592,6 +597,99 @@ func ApplyRulings(c Config, rulings []any, write bool) (Record, error) {
 	}
 	return report, nil
 }
+func reasons(rulings []any) map[string]string {
+	out := map[string]string{}
+	for _, x := range rulings {
+		r := record(x)
+		if tag := strings.TrimSpace(str(r["tag"])); tag != "" {
+			out[tag] = strings.TrimSpace(str(r["why"]))
+		}
+	}
+	return out
+}
+
+// retireRuled settles the creator maps, which are the fifth place a tag is
+// written down and the one a ruling used to miss.
+//
+// `pending:` is where a tagmap run parks a target the registry did not have,
+// held out of `mapping` so that nothing resolves onto a name nobody has agreed
+// to. Once it has been ruled on, the row has its answer, and leaving it in the
+// queue is worse than untidy: the queue asks the same question of every later
+// run while the creator's own spelling still maps to nothing, so the ruling is
+// recorded in the ledger and has no effect on what their recordings are tagged.
+//
+// An approval and a merge both become ordinary mapping rows, pointing -- as
+// every row must -- at a spelling the registry now has. An omission becomes a
+// recorded drop rather than vanishing, because "we considered this and said no"
+// and "nobody has looked at this yet" are different states and only one of them
+// should be asked about again.
+func retireRuled(c Config, reg *Registry, decided map[string]string,
+	why map[string]string, write bool) (Record, error) {
+	out := Record{"maps": 0, "mapped": 0, "dropped": 0}
+	entries, err := os.ReadDir(c.Decisions)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return out, nil
+		}
+		return nil, err
+	}
+	folded, reason := map[string]string{}, map[string]string{}
+	for raw, target := range decided {
+		folded[Fold(raw)] = target
+		reason[Fold(raw)] = why[raw]
+	}
+	for _, f := range entries {
+		if f.IsDir() || filepath.Ext(f.Name()) != ".yaml" || f.Name() == "rulings.yaml" {
+			continue
+		}
+		path := filepath.Join(c.Decisions, f.Name())
+		doc := optionalYAML(path)
+		if len(array(doc["pending"])) == 0 {
+			continue
+		}
+		mapping, pending, changed := array(doc["mapping"]), []any{}, false
+		for _, v := range array(doc["pending"]) {
+			r := record(v)
+			name := strings.TrimSpace(str(r["tag"]))
+			target, ruled := folded[Fold(name)]
+			if !ruled {
+				pending = append(pending, v)
+				continue
+			}
+			changed = true
+			// The row is keyed on what the creator wrote, not on the name the
+			// run proposed for it: the map exists to translate their vocabulary.
+			row := Record{"description": str(r["description"]), "verdict": "drop",
+				"tag": strings.TrimSpace(str(first(r["from"], name))), "to": ""}
+			if canonical := reg.Spelling[Fold(target)]; target != "" && canonical != "" {
+				row["to"], row["verdict"] = canonical, "map"
+				out["mapped"] = integer(out["mapped"]) + 1
+			} else {
+				out["dropped"] = integer(out["dropped"]) + 1
+			}
+			row["why"] = first(reason[Fold(name)], str(r["why"]))
+			mapping = append(mapping, row)
+		}
+		if !changed {
+			continue
+		}
+		doc["mapping"] = mapping
+		if len(pending) > 0 {
+			doc["pending"] = pending
+		} else {
+			delete(doc, "pending")
+		}
+		out["maps"] = integer(out["maps"]) + 1
+		if write {
+			if err := writeYAML(path, doc,
+				[]string{"author", "model", "unruled", "pending", "mapping", "retired"}); err != nil {
+				return out, err
+			}
+		}
+	}
+	return out, nil
+}
+
 func without(a []string, s string) []string {
 	out := []string{}
 	for _, v := range a {

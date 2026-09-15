@@ -25,6 +25,11 @@ type GPUBox struct {
 	Config          Config
 	Poll            time.Duration
 	mu              sync.Mutex
+
+	// How to install into the worker's venv, kept from provisioning so the
+	// embedding half can be fetched at the point something asks for it.
+	install  func(mods, pkgs string) string
+	embedded sync.Once
 }
 
 func NewGPUBox(c Config, directory string) *GPUBox {
@@ -63,10 +68,29 @@ func (b *GPUBox) Provision(ctx context.Context, install bool) error {
 		return e
 	}
 	if install {
-		script := "cd " + dir + " && (test -x venv/bin/python || python3 -m venv venv) && (venv/bin/python -c 'import faster_whisper, speechbrain, torch, av' || venv/bin/python -m pip install faster-whisper torch torchaudio speechbrain av nvidia-cublas-cu12 nvidia-cudnn-cu12)"
-		if _, e := b.run(ctx, script); e != nil {
-			return fmt.Errorf("GPU worker dependencies: %w", e)
+		// The worker loads Whisper and the speaker encoder lazily -- one on the
+		// first transcription, the other on the first embedding -- so a box that
+		// can do one kind of work is worth using even where it cannot do the
+		// other. Provisioning used to insist on both and fail the run if either
+		// was absent: 43 transcriptions on a box with a working faster-whisper
+		// were refused over `speechbrain`, which not one of them would have
+		// imported. So the two sets are provisioned separately, and only the
+		// transcription half is a precondition.
+		//
+		// `ensurepip` is the other half of the same failure. A venv built
+		// without pip cannot install anything, and what comes back is a bare
+		// "No module named pip" that names neither the box nor the venv.
+		venv := "cd " + dir + " && (test -x venv/bin/python || python3 -m venv venv)"
+		install := func(mods, pkgs string) string {
+			return venv + " && (venv/bin/python -c 'import " + mods + "' 2>/dev/null || " +
+				"(venv/bin/python -m ensurepip --upgrade >/dev/null 2>&1; " +
+				"venv/bin/python -m pip install " + pkgs + "))"
 		}
+		if _, e := b.run(ctx, install("faster_whisper, av",
+			"faster-whisper av nvidia-cublas-cu12 nvidia-cudnn-cu12")); e != nil {
+			return fmt.Errorf("GPU worker transcription dependencies: %w", e)
+		}
+		b.install = install
 	}
 	entries, _ := workerFiles.ReadDir("workers")
 	tmp, e := os.MkdirTemp("", "inductor-workers-*")
@@ -190,6 +214,17 @@ func (b *GPUBox) Work(ctx context.Context, id, kind, audio, landing string) (Rec
 			return record(r["result"]), nil
 		}
 		_ = os.Remove(path)
+	}
+	if kind == "embed" {
+		// Torch and speechbrain are gigabytes, and nothing but an embedding job
+		// loads them. Fetching them here rather than at provisioning time keeps
+		// a transcription run from waiting on a download it will never use --
+		// and keeps a box that has no room for them transcribing.
+		b.embedded.Do(func() {
+			if b.install != nil {
+				_, _ = b.run(ctx, b.install("speechbrain, torch", "torch torchaudio speechbrain"))
+			}
+		})
 	}
 	if e := b.Enqueue(ctx, id, kind, audio); e != nil {
 		return nil, e

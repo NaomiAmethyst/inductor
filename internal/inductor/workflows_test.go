@@ -396,3 +396,55 @@ func TestTagmapRowsMustPointIntoTheRegistry(t *testing.T) {
 		t.Fatal("check should name exactly the row pointing outside the registry:", got)
 	}
 }
+func TestARulingRetiresTheQueueItAnswered(t *testing.T) {
+	c := testConfig(t)
+	// A ruling that reached the registry and the items but left the creator map
+	// alone was the gap: the queue went on asking, and the creator's own
+	// spelling went on resolving to nothing, so the decision had no effect on
+	// what their recordings were tagged.
+	putRecord(t, MappingPath(c, "creator"), Record{"author": "creator",
+		"mapping": []any{Record{"tag": "calm", "verdict": "map", "to": "Relaxation"}},
+		"pending": []any{
+			Record{"tag": "Humour", "from": "humor", "count": 9, "why": "comedy is the intent"},
+			Record{"tag": "Gilding", "from": "aurification", "count": 1, "why": "turned to gold"},
+			Record{"tag": "Headphones", "from": "headphones on", "count": 2, "why": "listening advice"},
+			Record{"tag": "Unanswered", "from": "unanswered", "count": 1, "why": "nobody has looked"},
+		}})
+	rulings := []any{
+		Record{"tag": "Humour", "verdict": "approve", "description": "Comedy is the intent.",
+			"why": "recurs, and no existing tag says it"},
+		Record{"tag": "Gilding", "verdict": "merge", "merge_into": "Relaxation",
+			"why": "one recording; the broader tag already covers it"},
+		Record{"tag": "Headphones", "verdict": "omit", "why": "listening advice, not content"},
+	}
+	if _, err := ApplyRulings(c, rulings, true); err != nil {
+		t.Fatal(err)
+	}
+	doc := optionalYAML(MappingPath(c, "creator"))
+	rows := map[string]Record{}
+	for _, v := range array(doc["mapping"]) {
+		rows[str(record(v)["tag"])] = record(v)
+	}
+	// Keyed on what the creator wrote, not on the name the run proposed for it.
+	if got := rows["humor"]; str(got["to"]) != "Humour" || str(got["verdict"]) != "map" {
+		t.Fatal("an approved tag did not become a mapping row:", got)
+	}
+	if got := rows["aurification"]; str(got["to"]) != "Relaxation" || str(got["verdict"]) != "map" {
+		t.Fatal("a merge did not point the creator's spelling at the target:", got)
+	}
+	if got := rows["headphones on"]; str(got["verdict"]) != "drop" || str(got["to"]) != "" {
+		t.Fatal("an omission should be recorded as a drop, not forgotten:", got)
+	}
+	left := array(doc["pending"])
+	if len(left) != 1 || str(record(left[0])["tag"]) != "Unanswered" {
+		t.Fatal("exactly the unruled entry should still be queued:", left)
+	}
+	// Every row a ruling wrote has to name something the registry actually has.
+	dangling, err := DanglingMapTargets(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dangling) != 0 {
+		t.Fatal("a retired row points outside the registry:", dangling)
+	}
+}
