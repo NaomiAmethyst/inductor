@@ -1,0 +1,8 @@
+Reply with JSON and nothing else:
+
+{"merges": [{"tag": "<the refused proposal, copied exactly>",
+             "into": "<the new tag>",
+             "same": true or false,
+             "why": "<one sentence>"}]}
+
+Include an entry for every refused proposal you were given.

@@ -1,0 +1,5 @@
+Reply with JSON only, an object mapping each id to its cover:
+{"1": {"tagged": "the picture as comma-separated visual clauses for a tag-weighted model -- subject and bearing, clothing, place, light, palette, framing, style; 40-70 words",
+       "natural": "the same picture as two or three plain sentences",
+       "font": "one name from the list of typefaces"}, ...}
+Every id you were given must appear exactly once. Neither prompt repeats the creator's tags, and neither names an act, a state of undress, or anatomy.

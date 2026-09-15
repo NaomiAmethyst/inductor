@@ -1,0 +1,7 @@
+Reply with JSON only:
+{"mapping": [{
+  "tag": "their word, exactly as given",
+  "verdict": "map|new|drop",
+  "to": "for map, the registry tag to use, with its 'Kind: ' prefix or none; for new, the name the tag should have -- including the CW: prefix where it is a warning rather than a subject; empty for drop",
+  "description": "for new only, the one-line registry definition, in the voice of the existing ones: what it means, not why it was proposed",
+  "why": "a short phrase -- for drop, what it actually is; for new, what no existing tag covers"}]}

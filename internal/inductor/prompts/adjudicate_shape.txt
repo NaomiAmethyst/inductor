@@ -1,0 +1,8 @@
+Reply with JSON only:
+{"rulings": [{
+  "tag": "the proposed tag, exactly as given",
+  "verdict": "approve|rework|merge|omit",
+  "name": "for approve, the tag as it should be spelled, with its 'Kind: ' prefix or none -- CW: where it is a warning rather than a subject; for rework, the better name you are giving it; otherwise empty",
+  "description": "for approve or rework, the one-line registry definition, in the voice of the existing ones: what it means, not why it was proposed",
+  "merge_into": "for merge, the existing registry tag it collapses into",
+  "why": "one sentence, for a human reading the diff later"}]}

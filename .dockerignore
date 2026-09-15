@@ -1,0 +1,11 @@
+.git
+bin
+reference
+.inductor
+.pytest_cache
+.venv
+.env
+**/__pycache__
+**/*_test.go
+internal/inductor/testdata
+internal/inductor/workers/test_*.py

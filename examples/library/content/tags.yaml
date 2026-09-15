@@ -1,0 +1,10 @@
+voice:
+  fem: A feminine-sounding speaking voice.
+  masc: A masculine-sounding speaking voice.
+audience:
+  woman: Addresses a woman.
+  man: Addresses a man.
+  anyone: Does not require a particular audience gender.
+content:
+  Hypnosis: Contains hypnotic material.
+  Relaxation: Uses relaxation as a central theme.

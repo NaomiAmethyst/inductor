@@ -1,0 +1,9 @@
+/bin/
+/.inductor/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+coverage.out
+.env
+/reference/

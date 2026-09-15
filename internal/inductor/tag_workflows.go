@@ -1,0 +1,600 @@
+// SPDX-License-Identifier: GPL-3.0-only
+package inductor
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"gopkg.in/yaml.v3"
+	"io"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"syscall"
+	"time"
+)
+
+func RulingEntry(tag, verdict, why, into string, proposals int, model, source string) Record {
+	r := Record{"apiVersion": "inductor/v1", "kind": "TagRuling", "when": time.Now().Format("2006-01-02"), "tag": tag, "verdict": verdict}
+	for k, v := range map[string]string{"why": why, "into": into, "model": model, "source": source} {
+		if v != "" {
+			r[k] = v
+		}
+	}
+	if proposals != 0 {
+		r["proposals"] = proposals
+	}
+	return r
+}
+func AppendLedger(path string, rows []Record) (int, error) {
+	var b bytes.Buffer
+	count := 0
+	for _, r := range rows {
+		if !truth(r["tag"]) || !truth(r["verdict"]) {
+			continue
+		}
+		data, e := marshalYAML(r, []string{"apiVersion", "kind", "when", "tag", "verdict", "into", "why", "proposals", "model", "source"})
+		if e != nil {
+			return 0, e
+		}
+		b.WriteString("---\n")
+		b.Write(data)
+		count++
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
+		return 0, e
+	}
+	f, e := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if e != nil {
+		return 0, e
+	}
+	defer f.Close()
+	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); e != nil {
+		return 0, e
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	if _, e = f.Write(b.Bytes()); e != nil {
+		return 0, e
+	}
+	return count, f.Sync()
+}
+func ReadLedger(path string) ([]Record, error) {
+	f, e := os.Open(path)
+	if os.IsNotExist(e) {
+		return []Record{}, nil
+	}
+	if e != nil {
+		return nil, e
+	}
+	defer f.Close()
+	dec := yaml.NewDecoder(f)
+	out := []Record{}
+	for {
+		var r Record
+		e = dec.Decode(&r)
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			return nil, e
+		}
+		if truth(r["tag"]) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
+}
+func Standing(path string) (map[string]Record, error) {
+	rows, e := ReadLedger(path)
+	if e != nil {
+		return nil, e
+	}
+	out := map[string]Record{}
+	for _, r := range rows {
+		out[str(r["tag"])] = r
+	}
+	return out, nil
+}
+func wordFold(s string) string { return strings.ToLower(strings.Join(pythonFields(s), " ")) }
+func Refused(path string, known []string) (map[string]Record, error) {
+	standing, e := Standing(path)
+	if e != nil {
+		return nil, e
+	}
+	folded := map[string]bool{}
+	for _, s := range known {
+		folded[wordFold(s)] = true
+	}
+	out := map[string]Record{}
+	for t, r := range standing {
+		if contains([]string{"decline", "omit", "reject"}, str(r["verdict"])) && !folded[wordFold(t)] {
+			out[t] = r
+		}
+	}
+	return out, nil
+}
+func WorthRevisiting(path string, counts map[string]int, known []string) ([]Record, error) {
+	refused, e := Refused(path, known)
+	if e != nil {
+		return nil, e
+	}
+	out := []Record{}
+	for t, r := range refused {
+		now, then := counts[t], integer(r["proposals"])
+		if now < 4 || (then > 0 && now < then*2) {
+			continue
+		}
+		out = append(out, Record{"tag": t, "was": then, "now": now, "verdict": r["verdict"], "why": first(r["why"], ""), "when": first(r["when"], "")})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return integer(out[i]["now"])-integer(out[i]["was"]) > integer(out[j]["now"])-integer(out[j]["was"])
+	})
+	return out, nil
+}
+
+type TagRequest struct{ Spellings, Recordings map[string]bool }
+
+func AskedFor(root string) (map[string]*TagRequest, error) {
+	if !isDir(root) {
+		return nil, fmt.Errorf("expected stored enrichments at %s", root)
+	}
+	files, e := filepath.Glob(filepath.Join(root, "*.json"))
+	if e != nil {
+		return nil, e
+	}
+	out := map[string]*TagRequest{}
+	for _, p := range files {
+		doc := readJSON(p)
+		prints := texts(doc["audio"])
+		if s, ok := doc["audio"].(string); ok {
+			prints = []string{s}
+		}
+		if len(prints) == 0 {
+			continue
+		}
+		wanted := []string{}
+		final := record(doc["final"])
+		if len(final) > 0 {
+			for _, v := range array(final["new_tags"]) {
+				r := record(v)
+				if truth(r["tag"]) && contains([]string{"keep", "accept", "approve", "new"}, wordFold(str(r["verdict"]))) {
+					wanted = append(wanted, str(r["tag"]))
+				}
+			}
+		} else {
+			for _, v := range array(record(record(doc["analysis"])["tags"])["proposed"]) {
+				name, ok := v.(string)
+				if !ok {
+					r := record(v)
+					name = str(first(r["tag"], r["name"]))
+				}
+				if name != "" {
+					wanted = append(wanted, name)
+				}
+			}
+		}
+		for _, name := range wanted {
+			key := wordFold(name)
+			if out[key] == nil {
+				out[key] = &TagRequest{map[string]bool{}, map[string]bool{}}
+			}
+			out[key].Spellings[name] = true
+			for _, fp := range prints {
+				out[key].Recordings[fp] = true
+			}
+		}
+	}
+	return out, nil
+}
+func Backfill(c Config, tags []string, write bool) (Record, error) {
+	reg, e := LoadRegistry(c.RegistryPath())
+	if e != nil {
+		return nil, e
+	}
+	wanted, e := AskedFor(c.Analysis())
+	if e != nil {
+		return nil, e
+	}
+	docs, e := Documents(c.Content, "item")
+	if e != nil {
+		return nil, e
+	}
+	selected := map[string]bool{}
+	for _, t := range tags {
+		selected[wordFold(t)] = true
+	}
+	report := Record{"tags": Record{}, "items": 0, "added": 0}
+	for _, d := range docs {
+		fp := str(record(d.Data["provenance"])["fingerprint"])
+		changed := false
+		have := texts(d.Data["tags"])
+		for _, name := range sortedKeys(reg.Meanings) {
+			folded := wordFold(name)
+			if len(tags) > 0 && !selected[folded] {
+				continue
+			}
+			request := wanted[folded]
+			if request == nil || !request.Recordings[fp] {
+				continue
+			}
+			already := false
+			for _, t := range have {
+				already = already || wordFold(t) == folded
+			}
+			if already {
+				continue
+			}
+			have = append(have, name)
+			changed = true
+			report["added"] = integer(report["added"]) + 1
+			counts := record(report["tags"])
+			counts[name] = integer(counts[name]) + 1
+			en := record(record(d.Data["provenance"])["enriched"])
+			if len(en) > 0 {
+				added := uniqueStrings(append(texts(en["tags_added"]), name))
+				sort.Strings(added)
+				en["tags_added"] = added
+			}
+		}
+		if changed {
+			d.Data["tags"] = have
+			report["items"] = integer(report["items"]) + 1
+			if write {
+				if _, e = SaveDocument(d.Path, d.Data); e != nil {
+					return nil, e
+				}
+			}
+		}
+	}
+	return report, nil
+}
+func PendingTags(c Config, fromReviews bool) (map[string]Record, error) {
+	reg, e := LoadRegistry(c.RegistryPath())
+	if e != nil {
+		return nil, e
+	}
+	docs, e := Documents(c.Content, "item")
+	if e != nil {
+		return nil, e
+	}
+	out := map[string]Record{}
+	if fromReviews {
+		wanted, e := AskedFor(c.Analysis())
+		if e != nil {
+			return nil, e
+		}
+		titles := map[string]string{}
+		for _, d := range docs {
+			fp := str(record(d.Data["provenance"])["fingerprint"])
+			if titles[fp] == "" {
+				titles[fp] = str(first(d.Data["title"], d.Data["id"]))
+			}
+		}
+		known := map[string]bool{}
+		for name := range reg.Meanings {
+			known[wordFold(name)] = true
+		}
+		for folded, row := range wanted {
+			if known[folded] {
+				continue
+			}
+			name := sortedKeys(row.Spellings)[0]
+			items := []string{}
+			for _, fp := range sortedKeys(row.Recordings) {
+				if titles[fp] != "" && len(items) < 6 {
+					items = append(items, titles[fp])
+				}
+			}
+			out[name] = Record{"count": len(row.Recordings), "items": items, "reasons": []string{}}
+		}
+		return out, nil
+	}
+	for _, d := range docs {
+		mapping := LoadMapping(c, str(d.Data["author"]))
+		for _, v := range array(record(d.Data["provenance"])["proposed_tags"]) {
+			r := record(v)
+			tag := strings.TrimSpace(str(r["tag"]))
+			_, bare := SplitTag(tag)
+			if tag == "" || reg.Has(tag) || mapping[tag] != nil || mapping[bare] != nil {
+				continue
+			}
+			row := out[tag]
+			if row == nil {
+				row = Record{"count": 0, "items": []string{}, "reasons": []string{}}
+				out[tag] = row
+			}
+			row["count"] = integer(row["count"]) + 1
+			if len(texts(row["items"])) < 6 {
+				row["items"] = append(texts(row["items"]), str(first(d.Data["title"], d.Data["id"])))
+			}
+			why := strings.TrimSpace(str(r["why"]))
+			if why != "" && len(texts(row["reasons"])) < 4 {
+				row["reasons"] = append(texts(row["reasons"]), why)
+			}
+		}
+	}
+	return out, nil
+}
+func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model string, dry bool) (Record, error) {
+	c := e.Config
+	report, err := LoadSources(c.Sources)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := LoadRegistry(c.RegistryPath())
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]map[string]int{}
+	titles := map[string][]string{}
+	for _, s := range report.Sources {
+		a := s.AuthorID()
+		if counts[a] == nil {
+			counts[a] = map[string]int{}
+		}
+		titles[a] = append(titles[a], s.Title)
+		for _, tag := range texts(s.Data["tags"]) {
+			counts[a][strings.TrimSpace(tag)]++
+		}
+	}
+	if docs, err := Documents(c.Content, "item"); err == nil {
+		for _, d := range docs {
+			a := str(d.Data["author"])
+			if counts[a] == nil {
+				counts[a] = map[string]int{}
+			}
+			for _, tag := range texts(d.Data["tags"]) {
+				counts[a][tag]++
+			}
+		}
+	}
+	if len(authors) == 0 {
+		authors = sortedKeys(counts)
+	}
+	total := Record{"asked": 0, "ruled": 0}
+	for _, a := range authors {
+		known := LoadMapping(c, a)
+		todo := []string{}
+		for t := range counts[a] {
+			if known[t] == nil {
+				if _, settled := reg.Meanings[t]; !settled {
+					todo = append(todo, t)
+				}
+			}
+		}
+		sort.Slice(todo, func(i, j int) bool {
+			if counts[a][todo[i]] != counts[a][todo[j]] {
+				return counts[a][todo[i]] > counts[a][todo[j]]
+			}
+			return todo[i] < todo[j]
+		})
+		total["asked"] = integer(total["asked"]) + len(todo)
+		e.Say("%s: %d tag(s) to rule on", a, len(todo))
+		if dry {
+			continue
+		}
+		missing := []string{}
+		for start := 0; start < len(todo); start += 100 {
+			part := todo[start:min(start+100, len(todo))]
+			lines := []string{}
+			for _, t := range part {
+				lines = append(lines, fmt.Sprintf("%5d  %s", counts[a][t], t))
+			}
+			context := "\nSome of their recordings, for a sense of what they make:\n  " + strings.Join(titles[a][:min(12, len(titles[a]))], "\n  ") + "\n"
+			if len(known) > 0 {
+				context += "\nAlready decided for this creator, for consistency:\n"
+				keys := sortedKeys(known)
+				for _, t := range keys[:min(60, len(keys))] {
+					r := record(known[t])
+					context += "  " + t + " -> " + str(first(r["to"], r["verdict"])) + "\n"
+				}
+			}
+			user := "THE REGISTRY — each tag with what it means.\n" + reg.Block() + fmt.Sprintf("\n\n\nTAGS USED BY '%s', with how many of their recordings carry each. Rule on every one.\n", a) + strings.Join(lines, "\n") + "\n" + context + "\n" + prompt("tagmap_shape")
+			reply, err := e.API.ChatJSON(ctx, model, messages(prompt("tagmap_system"), user), TokenCeiling, .2)
+			if err != nil {
+				e.Say("tagmap %s: %v", a, err)
+				missing = append(missing, part...)
+				continue
+			}
+			fresh := map[string]bool{}
+			for _, v := range array(reply["mapping"]) {
+				r := record(v)
+				t := str(r["tag"])
+				if contains(part, t) {
+					known[t] = r
+					fresh[t] = true
+					total["ruled"] = integer(total["ruled"]) + 1
+				}
+			}
+			for _, t := range part {
+				if !fresh[t] {
+					missing = append(missing, t)
+				}
+			}
+		}
+		if len(todo) > 0 {
+			mapping := []any{}
+			for _, t := range sortedKeys(known) {
+				mapping = append(mapping, known[t])
+			}
+			body := Record{"author": a, "model": model, "mapping": mapping}
+			if len(missing) > 0 {
+				sort.Strings(missing)
+				body["unruled"] = missing
+			}
+			if err = writeYAML(MappingPath(c, a), body, []string{"author", "model", "unruled", "mapping"}); err != nil {
+				return total, err
+			}
+		}
+	}
+	return total, nil
+}
+func AdoptTagmaps(c Config, authors []string, write bool) ([]Record, error) {
+	reg, e := LoadRegistry(c.RegistryPath())
+	if e != nil {
+		return nil, e
+	}
+	maps := map[string]string{}
+	for _, dir := range []string{c.Decisions, filepath.Join(c.Root, "tagmaps")} {
+		files, _ := filepath.Glob(filepath.Join(dir, "*.yaml"))
+		for _, p := range files {
+			a := stemOf(p)
+			if maps[a] == "" {
+				maps[a] = p
+			}
+		}
+	}
+	added := []Record{}
+	for _, a := range sortedKeys(maps) {
+		if len(authors) > 0 && !contains(authors, a) {
+			continue
+		}
+		doc := optionalYAML(maps[a])
+		for _, v := range array(doc["mapping"]) {
+			r := record(v)
+			if str(r["verdict"]) != "new" {
+				continue
+			}
+			name := strings.TrimSpace(str(first(r["to"], r["name"], r["tag"])))
+			meaning := strings.TrimSpace(str(r["description"]))
+			if name == "" || meaning == "" || reg.Spelling[Fold(name)] != "" {
+				continue
+			}
+			kind := TagKindOf(name)
+			if _, ok := reg.Data[kind]; !ok {
+				return nil, fmt.Errorf("no %q block in registry", kind)
+			}
+			_, bare := SplitTag(name)
+			nested(reg.Data, kind)[bare] = meaning
+			reg = NewRegistry(reg.Data)
+			added = append(added, Record{"name": name, "description": meaning, "author": a})
+		}
+	}
+	if write && len(added) > 0 {
+		if _, e = SaveDocument(c.RegistryPath(), reg.Data); e != nil {
+			return nil, e
+		}
+		rows := []Record{}
+		for _, r := range added {
+			rows = append(rows, RulingEntry(str(r["name"]), "approve", str(r["description"]), "", 0, c.Enrich.AdjudicatorModel, "tagmap: "+str(r["author"])))
+		}
+		_, e = AppendLedger(filepath.Join(c.Decisions, "rulings.yaml"), rows)
+	}
+	return added, e
+}
+func (e *Engine) Adjudicate(ctx context.Context, fromReviews, collect bool, model, path string) (Record, error) {
+	rows, err := PendingTags(e.Config, fromReviews)
+	if err != nil {
+		return nil, err
+	}
+	reg, err := LoadRegistry(e.Config.RegistryPath())
+	if err != nil {
+		return nil, err
+	}
+	log := filepath.Join(e.Config.Decisions, "rulings.yaml")
+	settled, err := Standing(log)
+	if err != nil {
+		return nil, err
+	}
+	counts := map[string]int{}
+	for t, r := range rows {
+		counts[t] = integer(r["count"])
+	}
+	reopen, err := WorthRevisiting(log, counts, sortedKeys(reg.Meanings))
+	if err != nil {
+		return nil, err
+	}
+	reopened := map[string]bool{}
+	for _, r := range reopen {
+		reopened[str(r["tag"])] = true
+	}
+	asking := map[string]Record{}
+	for t, r := range rows {
+		if settled[t] == nil || reopened[t] {
+			asking[t] = r
+		}
+	}
+	if collect || len(asking) == 0 {
+		return Record{"pending": asking, "reopened": reopen}, nil
+	}
+	names := sortedKeys(asking)
+	sort.SliceStable(names, func(i, j int) bool { return integer(asking[names[i]]["count"]) > integer(asking[names[j]]["count"]) })
+	lines := []string{}
+	for _, tag := range names {
+		r := asking[tag]
+		lines = append(lines, fmt.Sprintf("\n=== %s   (proposed on %d recording(s))", tag, integer(r["count"])), "  seen on: "+strings.Join(texts(r["items"]), "; "))
+		for n, why := range texts(r["reasons"]) {
+			lines = append(lines, fmt.Sprintf("  justification %d: %s", n+1, why))
+		}
+	}
+	user := "THE REGISTRY AS IT STANDS — a tag already here is a reason to reject:\n" + reg.Block() + "\n\n\nTAGS PROPOSED DURING THIS RUN. Rule on every one.\n" + strings.Join(lines, "\n") + "\n\n" + prompt("adjudicate_shape")
+	reply, err := e.API.ChatJSON(ctx, model, messages(prompt("adjudicate_system"), user), TokenCeiling, .2)
+	if err != nil {
+		return nil, err
+	}
+	rulings := []any{}
+	logRows := []Record{}
+	for _, v := range array(reply["rulings"]) {
+		r := record(v)
+		tag := str(r["tag"])
+		if asking[tag] == nil {
+			continue
+		}
+		rulings = append(rulings, r)
+		logRows = append(logRows, RulingEntry(tag, str(r["verdict"]), str(r["why"]), str(first(r["merge_into"], r["name"])), counts[tag], model, "adjudicate"))
+	}
+	if err = writeYAML(path, Record{"model": model, "rulings": rulings}, []string{"model", "rulings"}); err != nil {
+		return nil, err
+	}
+	n, err := AppendLedger(log, logRows)
+	return Record{"rulings": len(rulings), "logged": n, "path": path}, err
+}
+func (e *Engine) Reconsider(ctx context.Context, tags []string, model string, write bool) (Record, error) {
+	reg, err := LoadRegistry(e.Config.RegistryPath())
+	if err != nil {
+		return nil, err
+	}
+	refused, err := Refused(filepath.Join(e.Config.Decisions, "rulings.yaml"), sortedKeys(reg.Meanings))
+	if err != nil {
+		return nil, err
+	}
+	found := []any{}
+	logs := []Record{}
+	for _, tag := range tags {
+		if _, ok := reg.Meanings[tag]; !ok {
+			return nil, fmt.Errorf("new tag %q is not in the registry", tag)
+		}
+		names := sortedKeys(refused)
+		for start := 0; start < len(names); start += 60 {
+			part := names[start:min(start+60, len(names))]
+			lines := []string{}
+			for _, t := range part {
+				if wordFold(t) != wordFold(tag) {
+					lines = append(lines, "- "+t+"   (refused: "+str(first(refused[t]["why"], "no reason recorded"))+")")
+				}
+			}
+			user := "THE NEWLY ADOPTED TAG\n" + tag + ": " + reg.Meanings[tag] + "\n\nREFUSED PROPOSALS\n" + strings.Join(lines, "\n") + "\n\n" + prompt("reconsider_shape")
+			reply, err := e.API.ChatJSON(ctx, model, messages(prompt("reconsider_system"), user), TokenCeiling, .1)
+			if err != nil {
+				return nil, err
+			}
+			for _, v := range array(reply["merges"]) {
+				r := record(v)
+				t := str(r["tag"])
+				if truth(r["same"]) && contains(part, t) && wordFold(t) != wordFold(tag) {
+					found = append(found, Record{"tag": t, "into": tag, "why": str(r["why"])})
+					logs = append(logs, RulingEntry(t, "merge", str(r["why"]), tag, 0, model, "reconsider (reviewer-proposed)"))
+				}
+			}
+		}
+	}
+	written := 0
+	if write {
+		written, err = AppendLedger(filepath.Join(e.Config.Decisions, "rulings.yaml"), logs)
+	}
+	return Record{"proposed": found, "written": written}, err
+}

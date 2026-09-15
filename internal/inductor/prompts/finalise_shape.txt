@@ -1,0 +1,33 @@
+{
+  "title": "the recording's title, corrected only if the given one is clearly wrong or empty; otherwise return it unchanged",
+  "summary": "ONE sentence, under 160 characters, no full stop needed. This is the listing blurb. Concrete about what the file does, not ad copy.",
+  "description": "<p>Two to four short paragraphs of HTML.</p><p>What the recording is, how it proceeds, what it asks of the listener, and who it is for. Written to the listener as 'you', in the present tense, in the register of the recording itself: 'The count runs down from ten, and each number takes the room further away' rather than 'The recording opens with a descending countdown induction.' Never write as the creator or in their first person -- you are describing their work to somebody deciding whether to play it, not speaking for them. No sales copy, no second-guessing what the listener will feel: say what happens. Use only <p>, <em>, <strong> and <ul>/<li>. No headings, no links.</p>",
+  "tags": ["AT MOST 20 tags, and fewer is better -- a 45-tag entry is not more searchable, it is unreadable. Pick the ones a person would actually browse by. Never list two spellings of one idea (Countdown and Countdowns, Gentle Domme and Gentle Femdom, Brainwashing and "Brainwashing and Conditioning"), and never use a bare kind name (Trigger, Induction) as a tag. Copied EXACTLY from the vocabulary where one fits -- character for character, keeping the 'Kind: ' prefix. Always include one Voice: tag for how the speaker presents, and one Audience: tag for who is addressed; both are gender, never a claim about anyone's body. Prefer a near-miss from the vocabulary over a new tag that fits better: an idea spelled six ways is six tags nobody can browse. Do not emit a Duration: tag -- the build computes it."],
+  "new_tags": [{
+    "tag": "Each tag the first pass proposed is listed below with its reasoning and its cited sentences. Rule on each one, and add none of your own. Keep a tag only if ALL of these hold: no registry tag's definition covers it; the cited sentences actually support it; a person browsing would click it; and it would fit other recordings too, not just this one. Most proposals should be rejected.",
+    "verdict": "keep|reject",
+    "why": "If keeping: a paragraph justifying it to an editor who will decide whether it enters the registry for good. Say what it names, why no existing tag covers it -- name the closest ones and say what they miss -- and quote the recording inline where the words make the case. If rejecting: one line naming the registry tag that covers it instead.",
+    "instead": "when rejecting, the registry tag to use in its place, or empty"}],
+  "spoilers": [{
+    "severity": "low|medium|high — rate by REACH, not by how kinky it is. low: confined to the session; it ends when the recording does. medium: persists afterwards but is bounded — fires only on a cue the creator controls, or on a deliberate act by the listener, or fades on its own. high: fires in ordinary life outside the listener's control, or compounds with repetition, or touches identity/orientation, or installs amnesia, or asks for real-world action (spending, contacting someone, a task). Severity is independent of disclosure: a suggestion the creator describes plainly can still be high, and a mild one nobody mentioned is still low. A file whose findings are all one severity is usually a file that has not been graded.",
+    "disclosure": "declared|generic_only|undisclosed",
+    "confidence": "low|medium|high",
+    "timestamp": "H:MM:SS — the time marker immediately before the sentence you quoted, not the start of the passage",
+    "trigger": "the trigger phrase, or a short label for a compulsion/suggestion",
+    "effect": "what it does to the listener, specifically, AND HOW FAR IT REACHES. The scope clause is the point of the entry: when it fires, how often, where, and through what channel. 'you feel it when she calls you a good girl' is not the finding -- 'in person, on a call, or by text' is, because that is what follows the listener out of the session and into an ordinary day. Carry every qualifier the recording gives: any time, every time, even when, whether X or Y, no matter where, including a blink, for the rest of your life. If the recording bounds it instead (only from me, only these words, fades after two weeks), say that too -- a bound is as much use to a reader as a reach.",
+    "quote": "a sentence from the passage, copied verbatim. Where the scope sits in a clause of that sentence, keep the clause -- do not cut the quote before the part that says how far it goes.",
+    "note": "why this rating; say plainly if the tags already cover it"}],
+  "thumbnail_prompt": "The same cover image written for a tag-weighted model (SDXL and its kin): 40-70 words of comma-separated clauses, no sentences. Subject first, then setting, lighting, colour, mood, composition, lens, style. Evocative and sensual, not pornographic. No text or lettering. No named or recognisable people.",
+  "thumbnail_prompt_natural": "The same cover image again, written as prose for a model that reads instructions (Flux, SD3, and their kin): two or three sentences describing one scene, in the order a person would say it. Same subject, same mood, same limits -- this is a translation of the other prompt, not a second idea.",
+  "thumbnail_negative": "short comma-separated list of things to keep out; tag-weighted models use it, prose models ignore it",
+  "verification": {
+    "claims_checked": 0,
+    "claims_dropped": 0,
+    "dropped_reasons": ["one line each"],
+    "transcript_quality": "good|patchy|poor",
+    "confidence": "low|medium|high"}
+}
+
+SEVERITY. high: anything reaching outside the session — real-world tasks, spending, contacting the creator, permanent identity or orientation change, amnesia, suggestions that compound with repetition, anything bypassing later consent. medium: lasting triggers, conditioned arousal, addiction framing, degradation the tags do not announce. low: session-only effects that end on waking.
+
+DISCLOSURE. 'declared' when this item's own tags already name it (say which). 'generic_only' when a broad tag hints at it but not the specific mechanism. 'undisclosed' when nothing in the tags or the write-up would warn you.

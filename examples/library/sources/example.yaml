@@ -1,0 +1,9 @@
+apiVersion: inductor/v1
+kind: Source
+audio: /path/to/recording.mp3
+title: Example Recording
+author: Example Creator
+description: |
+  The creator's original description goes here.
+tags: [Hypnosis]
+source_url: https://example.com/recording

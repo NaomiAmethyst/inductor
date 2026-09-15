@@ -1,0 +1,21 @@
+name: Test
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python -m pip install pyyaml mutagen numpy av pillow pytest
+      - run: make test vet build test-worker test-reference
+      - run: test -z "$(gofmt -l cmd internal/inductor)"
+      - run: bin/inductor --help

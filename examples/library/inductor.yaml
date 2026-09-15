@@ -1,0 +1,30 @@
+paths:
+  sources: sources
+  content: content
+  media: media
+  covers: media/cover
+  cache: .inductor
+  decisions: state/decisions
+media:
+  mode: symlink
+  transcode: if-needed
+transcribe:
+  remote: ""                     # SSH host; empty uses the local CPU
+  remote_dir: ~/inductor-stt
+  model: distil-large-v3
+  language: en
+  batch_size: 16
+  workers: 6
+enrich:
+  # Defaults retained from the original application; choose models available
+  # to your OpenRouter account. A :batch suffix enables batch review.
+  analysis_model: deepseek/deepseek-v4-flash
+  review_model: google/gemini-3.8-flash:batch
+  adjudicator_model: anthropic/claude-opus-5
+  workers: 12
+  batch_size: 150
+  covers: false
+  comfy_url: http://127.0.0.1:8188
+  cover_engine: turbo
+  cover_width: 1024
+  cover_height: 576

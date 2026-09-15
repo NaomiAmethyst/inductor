@@ -1,0 +1,1014 @@
+{
+  "check": {
+    "options": []
+  },
+  "ingest": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit to one creator id"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--needs"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "only records whose item still lists this in needs: (description, summary, tags, spoilers). Repeatable"
+      },
+      {
+        "names": [
+          "--stage"
+        ],
+        "action": "append",
+        "choices": [
+          "media",
+          "transcribe",
+          "analyse",
+          "review",
+          "emit"
+        ],
+        "help": "run only this stage (repeatable)"
+      },
+      {
+        "names": [
+          "--new"
+        ],
+        "action": "store_true",
+        "help": "only records nothing has an entry for at all"
+      },
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "store_true",
+        "help": "include items that are already finished; without it a run does only what is outstanding"
+      },
+      {
+        "names": [
+          "--redo-analysis"
+        ],
+        "action": "store_true",
+        "help": "analyse again even where a cached analysis exists"
+      },
+      {
+        "names": [
+          "--in-flight"
+        ],
+        "type": "int",
+        "default": 4,
+        "help": "review batches submitted at once"
+      },
+      {
+        "names": [
+          "--poll"
+        ],
+        "type": "int",
+        "default": 60
+      },
+      {
+        "names": [
+          "--recover"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "adopt an already-submitted review batch"
+      },
+      {
+        "names": [
+          "--overwrite"
+        ],
+        "action": "store_true",
+        "help": "let this run replace a summary or spoilers that are already written; without it nothing existing is touched"
+      },
+      {
+        "names": [
+          "--no-covers"
+        ],
+        "action": "store_true",
+        "help": "skip cover art even where the config asks for it"
+      },
+      {
+        "names": [
+          "--force"
+        ],
+        "action": "store_true",
+        "help": "ingest even though the sources have errors"
+      }
+    ]
+  },
+  "adjudicate": {
+    "options": [
+      {
+        "names": [
+          "--collect"
+        ],
+        "action": "store_true",
+        "help": "show what is pending"
+      },
+      {
+        "names": [
+          "--from-reviews"
+        ],
+        "action": "store_true",
+        "help": "rule on what the reviewer asked to keep, from the stored enrichments rather than from items"
+      },
+      {
+        "names": [
+          "--apply"
+        ],
+        "action": "store_true",
+        "help": "fold the rulings into the registry and onto the items"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "with --apply, actually write"
+      },
+      {
+        "names": [
+          "--rulings"
+        ],
+        "type": "pathlib.Path",
+        "help": "where the rulings file lives"
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "help": "override the configured adjudicator"
+      }
+    ]
+  },
+  "authors": {
+    "options": [
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "store_true",
+        "help": "include creators that have art"
+      },
+      {
+        "names": [
+          "--keep-synopsis"
+        ],
+        "action": "store_true",
+        "help": "re-do the art only; leave the written paragraphs alone"
+      },
+      {
+        "names": [
+          "--no-render"
+        ],
+        "action": "store_true",
+        "help": "write prompts, draw nothing"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the changes"
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "help": "override the configured cheap model"
+      }
+    ]
+  },
+  "voiceprint": {
+    "options": [
+      {
+        "names": [
+          "--embed"
+        ],
+        "action": "store_true",
+        "help": "embed what is not done yet"
+      },
+      {
+        "names": [
+          "--verify"
+        ],
+        "action": "store_true",
+        "help": "report recordings that do not sound like their creator"
+      },
+      {
+        "names": [
+          "--cameos"
+        ],
+        "action": "store_true",
+        "help": "report stretches spoken by another creator"
+      },
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit the embedding to one creator"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "store_true",
+        "help": "embed again where done"
+      },
+      {
+        "names": [
+          "--host"
+        ],
+        "help": "the box with the GPU (default: transcribe.remote)"
+      },
+      {
+        "names": [
+          "--remote-dir"
+        ],
+        "default": "inductor-voice"
+      },
+      {
+        "names": [
+          "--floor"
+        ],
+        "type": "float",
+        "default": 0.55,
+        "help": "below this a recording does not sound like its creator"
+      },
+      {
+        "names": [
+          "--show"
+        ],
+        "type": "int",
+        "default": 20
+      }
+    ]
+  },
+  "similar": {
+    "options": [
+      {
+        "names": [
+          "--floor"
+        ],
+        "type": "float",
+        "default": null
+      },
+      {
+        "names": [
+          "--most"
+        ],
+        "type": "int",
+        "default": 8
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "run": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ]
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--new"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--overwrite"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--no-covers"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--no-pages"
+        ],
+        "action": "store_true",
+        "help": "skip writing creator pages at the end of the run"
+      },
+      {
+        "names": [
+          "--only"
+        ],
+        "type": "pathlib.Path",
+        "help": "run only the items named in this file, one declared id per line. Implies a re-run: a named item is one somebody wants looked at again"
+      },
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "make this artefact again whatever is already on disk (repeatable; any name in the graph, e.g. review, cover)"
+      },
+      {
+        "names": [
+          "--no-provision"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--batch"
+        ],
+        "type": "int",
+        "default": 150
+      },
+      {
+        "names": [
+          "--remote-dir"
+        ],
+        "default": "inductor"
+      },
+      {
+        "names": [
+          "--force"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "backfill": {
+    "options": [
+      {
+        "names": [
+          "--tag"
+        ],
+        "action": "append",
+        "help": "just this tag (repeatable); default is every registry tag"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "reconsider": {
+    "options": [
+      {
+        "names": [
+          "--tag"
+        ],
+        "action": "append",
+        "help": "a newly adopted tag (repeatable)"
+      },
+      {
+        "names": [
+          "--model"
+        ]
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "record the accepted merges as rulings in the ledger"
+      }
+    ]
+  },
+  "orphans": {
+    "options": [
+      {
+        "names": [
+          "--show"
+        ],
+        "type": "int",
+        "default": 8,
+        "help": "how many of each to print"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "remove the creator pages and transcripts nothing refers to"
+      }
+    ]
+  },
+  "paths": {
+    "options": [
+      {
+        "names": [
+          "--show"
+        ],
+        "type": "int",
+        "default": 6,
+        "help": "how many to print"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the changes"
+      }
+    ]
+  },
+  "attribute": {
+    "options": [
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "store_true",
+        "help": "include entries that already carry the record"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the changes"
+      }
+    ]
+  },
+  "artwork": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit to one creator"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--redo"
+        ],
+        "action": "store_true",
+        "help": "every generated cover, not only those of the wrong shape"
+      },
+      {
+        "names": [
+          "--workers"
+        ],
+        "type": "int",
+        "default": 3
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "draw them"
+      }
+    ]
+  },
+  "fold": {
+    "options": [
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the changes"
+      }
+    ]
+  },
+  "retitle": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit to one creator"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--tidy"
+        ],
+        "action": "store_true",
+        "help": "take the post header off titles that wear one; no model"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the titles"
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "help": "override the configured cheap model"
+      }
+    ]
+  },
+  "cover-prompts": {
+    "options": [
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--workers"
+        ],
+        "type": "int",
+        "default": 8
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "help": "override the configured cheap model"
+      }
+    ]
+  },
+  "retag": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit to one creator"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "write the changes"
+      },
+      {
+        "names": [
+          "--samples"
+        ],
+        "type": "int",
+        "default": 15,
+        "help": "examples to print"
+      }
+    ]
+  },
+  "duplicates": {
+    "options": [
+      {
+        "names": [
+          "--merge"
+        ],
+        "action": "store_true",
+        "help": "fold the groups that differ only by a numeric suffix"
+      },
+      {
+        "names": [
+          "--resolve"
+        ],
+        "action": "store_true",
+        "help": "merge every group, by rank and by the decisions file"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "with --resolve, write"
+      },
+      {
+        "names": [
+          "--decisions"
+        ],
+        "default": "tools/tags/decisions-duplicates.yaml",
+        "help": "a Decisions file naming the item that survives"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 20,
+        "help": "how many ambiguous groups to print"
+      }
+    ]
+  },
+  "export": {
+    "options": [
+      {
+        "names": [
+          "--content"
+        ],
+        "type": "pathlib.Path"
+      },
+      {
+        "names": [
+          "--out"
+        ],
+        "type": "pathlib.Path"
+      },
+      {
+        "names": [
+          "--assets"
+        ],
+        "type": "pathlib.Path",
+        "help": "where relative audio paths resolve from"
+      },
+      {
+        "names": [
+          "--snapshot"
+        ],
+        "type": "pathlib.Path",
+        "help": "a copy of the items from before enrichment, used as the authority on which tags were really the source's"
+      }
+    ]
+  },
+  "tagmap": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "action": "append",
+        "help": "just this author id (repeatable)"
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "default": "anthropic/claude-opus-5"
+      },
+      {
+        "names": [
+          "--adopt"
+        ],
+        "action": "store_true",
+        "help": "fold the tags the maps ask for into the registry"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "with --adopt, write"
+      },
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "migrate": {
+    "options": [
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "acoustic": {
+    "options": [
+      {
+        "names": [
+          "--workers"
+        ],
+        "type": "int",
+        "default": 0,
+        "help": null
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--force"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "acoustic-apply": {
+    "options": [
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "add": {
+    "options": [
+      {
+        "names": [
+          "paths"
+        ],
+        "nargs": "+",
+        "help": "audio files or folders"
+      },
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "existing author id"
+      },
+      {
+        "names": [
+          "--author-name"
+        ],
+        "help": "display name; creates the author if new"
+      },
+      {
+        "names": [
+          "--url"
+        ],
+        "help": "the creator's site, for a new author"
+      },
+      {
+        "names": [
+          "--series"
+        ],
+        "help": "set on every item added"
+      },
+      {
+        "names": [
+          "--date"
+        ],
+        "help": "release date, YYYY or YYYY-MM-DD"
+      },
+      {
+        "names": [
+          "--tag"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "extra tag (repeatable)"
+      },
+      {
+        "names": [
+          "--not-explicit"
+        ],
+        "action": "store_true"
+      },
+      {
+        "names": [
+          "--dry-run"
+        ],
+        "action": "store_true"
+      }
+    ]
+  },
+  "compare": {
+    "options": [
+      {
+        "names": [
+          "--items"
+        ],
+        "type": "int",
+        "default": 10
+      },
+      {
+        "names": [
+          "--sample-file"
+        ],
+        "type": "Path",
+        "help": "reuse (or record) the exact item ids, so runs are comparable"
+      },
+      {
+        "names": [
+          "--model"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "review model, fed the first-pass analysis (repeatable)"
+      },
+      {
+        "names": [
+          "--solo"
+        ],
+        "action": "append",
+        "default": [],
+        "help": "model that does the whole job from the full transcript"
+      },
+      {
+        "names": [
+          "--seed"
+        ],
+        "type": "int",
+        "default": 11
+      },
+      {
+        "names": [
+          "--workers"
+        ],
+        "type": "int",
+        "default": 6
+      },
+      {
+        "names": [
+          "--poll"
+        ],
+        "type": "int",
+        "default": 45
+      }
+    ]
+  },
+  "transcribe": {
+    "options": [
+      {
+        "names": [
+          "--model"
+        ],
+        "default": "distil-large-v3"
+      }
+    ]
+  },
+  "transcribe/status": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ]
+      }
+    ]
+  },
+  "transcribe/audit": {
+    "options": [
+      {
+        "names": [
+          "--coverage"
+        ],
+        "type": "float",
+        "default": 0.9,
+        "help": "flag anything covering less than this fraction (default 0.9)"
+      },
+      {
+        "names": [
+          "--readers"
+        ],
+        "type": "int",
+        "default": 16
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--out"
+        ],
+        "type": "Path",
+        "help": "write the flagged fingerprints here"
+      }
+    ]
+  },
+  "transcribe/run": {
+    "options": [
+      {
+        "names": [
+          "--author"
+        ],
+        "help": "limit to one author id"
+      },
+      {
+        "names": [
+          "--path"
+        ],
+        "action": "append",
+        "help": "transcribe loose files or a directory instead of the library"
+      },
+      {
+        "names": [
+          "--from-list"
+        ],
+        "type": "Path",
+        "help": "a file of audio paths, one per line, to transcribe"
+      },
+      {
+        "names": [
+          "--limit"
+        ],
+        "type": "int",
+        "default": 0
+      },
+      {
+        "names": [
+          "--readers"
+        ],
+        "type": "int",
+        "default": 6
+      },
+      {
+        "names": [
+          "--interval"
+        ],
+        "type": "int",
+        "default": 20
+      },
+      {
+        "names": [
+          "--stop-worker"
+        ],
+        "action": "store_true",
+        "help": "shut the worker down when the queue is empty"
+      }
+    ]
+  },
+  "transcribe/worker": {
+    "options": [
+      {
+        "names": [
+          "action"
+        ],
+        "choices": [
+          "start",
+          "stop",
+          "kill",
+          "log",
+          "failures"
+        ]
+      },
+      {
+        "names": [
+          "--lines"
+        ],
+        "type": "int",
+        "default": 40
+      }
+    ]
+  }
+}

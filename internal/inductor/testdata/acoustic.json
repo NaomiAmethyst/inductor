@@ -1,0 +1,16 @@
+{
+ "rms": 0.21425,
+ "peak": 0.4352,
+ "crest_db": 6.15,
+ "silence_ratio": 1.0,
+ "spectral_centroid_hz": 1146.3,
+ "f0_median_hz": 145.1,
+ "f0_spread_hz": 28.5,
+ "f0_reliable": true,
+ "voiced_frames": 240,
+ "hnr_db": 11.9,
+ "level_variation": 0.002,
+ "voiced_share": 1.0,
+ "brightness_hz": 183.1,
+ "brightness_spread_hz": 25.6
+}
