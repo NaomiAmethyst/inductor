@@ -262,6 +262,31 @@ func PendingTags(c Config, fromReviews bool) (map[string]Record, error) {
 		return nil, e
 	}
 	out := map[string]Record{}
+	// Targets a tagmap run wanted but the registry does not have. They are held
+	// in the creator's own file rather than in `mapping`, precisely so nothing
+	// can map onto them until they have been ruled on -- which only works if
+	// they are put to the adjudicator, so they are collected here.
+	queued, e := QueuedTargets(c)
+	if e != nil {
+		return nil, e
+	}
+	for _, r := range queued {
+		tag := str(r["tag"])
+		if tag == "" || reg.Has(tag) {
+			continue
+		}
+		row := out[tag]
+		if row == nil {
+			row = Record{"count": 0, "items": []string{}, "reasons": []string{}}
+			out[tag] = row
+		}
+		row["count"] = integer(row["count"]) + integer(r["count"])
+		why := strings.TrimSpace(str(r["why"]))
+		if why != "" && len(texts(row["reasons"])) < 4 {
+			row["reasons"] = append(texts(row["reasons"]),
+				fmt.Sprintf("%s wants it for %q: %s", str(r["author"]), str(r["from"]), why))
+		}
+	}
 	if fromReviews {
 		wanted, e := AskedFor(c.Analysis())
 		if e != nil {
@@ -298,8 +323,18 @@ func PendingTags(c Config, fromReviews bool) (map[string]Record, error) {
 		for _, v := range array(record(d.Data["provenance"])["proposed_tags"]) {
 			r := record(v)
 			tag := strings.TrimSpace(str(r["tag"]))
-			_, bare := SplitTag(tag)
-			if tag == "" || reg.Has(tag) || mapping[tag] != nil || mapping[bare] != nil {
+			if tag == "" {
+				continue
+			}
+			// Settled means something actually resolves the tag, not that a row
+			// mentions it. A creator's map saying `humor -> Humour` leaves the tag
+			// homeless for as long as `Humour` is absent from the registry, and
+			// that is the case most in need of a ruling rather than least.
+			// Counting any mapping row as an answer swallowed 34 spellings over
+			// 104 recordings here: proposed on the items, reported by `retag`, and
+			// never once put to the adjudicator -- which is how 874 unregistered
+			// spellings accumulated the last time.
+			if s, why := reg.Resolve(tag, mapping); s != "" || why == "dropped" {
 				continue
 			}
 			row := out[tag]
@@ -355,9 +390,10 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 	if len(authors) == 0 {
 		authors = sortedKeys(counts)
 	}
-	total := Record{"asked": 0, "ruled": 0}
+	total := Record{"asked": 0, "ruled": 0, "pending": 0}
 	for _, a := range authors {
 		known := LoadMapping(c, a)
+		waiting := map[string]Record{}
 		todo := []string{}
 		for t := range counts[a] {
 			if known[t] == nil {
@@ -404,11 +440,29 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 			for _, v := range array(reply["mapping"]) {
 				r := record(v)
 				t := str(r["tag"])
-				if contains(part, t) {
-					known[t] = r
-					fresh[t] = true
-					total["ruled"] = integer(total["ruled"]) + 1
+				if !contains(part, t) {
+					continue
 				}
+				fresh[t] = true
+				total["ruled"] = integer(total["ruled"]) + 1
+				// A map may only point into the registry. Where the model wants a
+				// name the registry does not have, that name is a *proposal* and
+				// has to be adjudicated before anything may map onto it -- writing
+				// it as a settled row instead produces a decision file that reads
+				// as answered and resolves to nothing. That is how 100 rows across
+				// five creators came to point at tags like "Humour" and "Exercise"
+				// that were never added, each one quietly costing an item the tag
+				// the registry did have.
+				target := strings.TrimSpace(str(r["to"]))
+				if target != "" && strings.ToLower(str(r["verdict"])) != "drop" &&
+					reg.Spelling[Fold(target)] == "" {
+					waiting[target] = Record{"tag": target, "from": t, "author": a,
+						"count": counts[a][t], "description": str(r["description"]),
+						"why": str(r["why"])}
+					total["pending"] = integer(total["pending"]) + 1
+					continue
+				}
+				known[t] = r
 			}
 			for _, t := range part {
 				if !fresh[t] {
@@ -426,7 +480,17 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 				sort.Strings(missing)
 				body["unruled"] = missing
 			}
-			if err = writeYAML(MappingPath(c, a), body, []string{"author", "model", "unruled", "mapping"}); err != nil {
+			if len(waiting) > 0 {
+				// Not a mapping: a queue. `LoadMapping` reads only `mapping`, so
+				// nothing here can answer for a tag until the adjudicator has put
+				// the target in the registry.
+				rows := []any{}
+				for _, k := range sortedKeys(waiting) {
+					rows = append(rows, waiting[k])
+				}
+				body["pending"] = rows
+			}
+			if err = writeYAML(MappingPath(c, a), body, []string{"author", "model", "unruled", "pending", "mapping"}); err != nil {
 				return total, err
 			}
 		}

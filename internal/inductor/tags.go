@@ -3,6 +3,7 @@ package inductor
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -123,7 +124,15 @@ func (r *Registry) Resolve(tag string, mapping Record) (string, string) {
 			if found := r.Spelling[Fold(target)]; found != "" {
 				return found, "mapped"
 			}
-			return "", "unresolved"
+			// The row names a tag the registry does not have, so it is not an
+			// answer -- and a row that answers nothing must not be allowed to
+			// take the tag away. The registry wins: fall through and let it rule
+			// on the tag as written. Returning "unresolved" here instead put a
+			// creator's map above the registry it is supposed to point into, and
+			// stripped 1,029 registered tags off 675 recordings in one pass,
+			// every one of them a tag the registry already had under the spelling
+			// the item was using. `check` reports these rows; they are to be
+			// adjudicated into the registry or dropped from the map.
 		}
 	}
 	if prefix != "" {
@@ -203,6 +212,97 @@ func DurationTag(seconds float64) string {
 	}
 	return "Duration: 120+"
 }
+
+// QueuedTargets returns the registry entries creator maps are waiting on.
+//
+// `tagmap` puts a target it cannot find in the registry here instead of into
+// `mapping`, so the row cannot answer for a tag before anybody has ruled on it.
+// The queue is only half a rule, though: a proposal nothing ever reads is the
+// same silence as a dangling row. This is the half that reads it.
+func QueuedTargets(c Config) ([]Record, error) {
+	entries, e := os.ReadDir(c.Decisions)
+	if e != nil {
+		if os.IsNotExist(e) {
+			return nil, nil
+		}
+		return nil, e
+	}
+	out := []Record{}
+	for _, f := range entries {
+		if f.IsDir() || filepath.Ext(f.Name()) != ".yaml" {
+			continue
+		}
+		author := strings.TrimSuffix(f.Name(), ".yaml")
+		for _, v := range array(optionalYAML(filepath.Join(c.Decisions, f.Name()))["pending"]) {
+			r := clone(record(v))
+			if str(r["tag"]) == "" {
+				continue
+			}
+			if str(r["author"]) == "" {
+				r["author"] = author
+			}
+			out = append(out, r)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return str(out[i]["tag"]) < str(out[j]["tag"]) })
+	return out, nil
+}
+
+// DanglingMapTargets finds every mapping row that points somewhere the registry
+// does not go.
+//
+// A creator's map exists to say what their vocabulary becomes *in the registry*.
+// A row whose `to:` names something the registry has never heard of therefore
+// answers nothing, and the resolver treats it as silence -- but silence in a
+// decision file is the kind of fault that hides: the row reads as settled, and
+// the tag it was meant to place goes on being proposed for ever. So they are
+// reported, and each one is to be adjudicated into the registry or dropped from
+// the map.
+//
+// `redundant` says the row's own tag is already registered, which makes the row
+// pure loss: delete it and the registry answers correctly on its own.
+func DanglingMapTargets(c Config) ([]Record, error) {
+	reg, e := LoadRegistry(c.RegistryPath())
+	if e != nil {
+		return nil, e
+	}
+	entries, e := os.ReadDir(c.Decisions)
+	if e != nil {
+		if os.IsNotExist(e) {
+			return nil, nil
+		}
+		return nil, e
+	}
+	out := []Record{}
+	for _, f := range entries {
+		if f.IsDir() || filepath.Ext(f.Name()) != ".yaml" {
+			continue
+		}
+		author := strings.TrimSuffix(f.Name(), ".yaml")
+		for _, v := range array(optionalYAML(filepath.Join(c.Decisions, f.Name()))["mapping"]) {
+			r := record(v)
+			tag := strings.TrimSpace(str(r["tag"]))
+			target := strings.TrimSpace(str(r["to"]))
+			if tag == "" || target == "" || strings.ToLower(str(r["verdict"])) == "drop" {
+				continue
+			}
+			if reg.Spelling[Fold(target)] != "" {
+				continue
+			}
+			out = append(out, Record{"author": author, "tag": tag, "to": target,
+				"verdict": str(r["verdict"]), "why": str(r["why"]),
+				"redundant": reg.Spelling[Fold(tag)] != ""})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if str(out[i]["author"]) != str(out[j]["author"]) {
+			return str(out[i]["author"]) < str(out[j]["author"])
+		}
+		return str(out[i]["tag"]) < str(out[j]["tag"])
+	})
+	return out, nil
+}
+
 func MappingPath(c Config, author string) string {
 	now := filepath.Join(c.Decisions, author+".yaml")
 	if exists(now) {
@@ -304,7 +404,7 @@ func ApplyRulings(c Config, rulings []any, write bool) (Record, error) {
 		return nil, e
 	}
 	decided := Decisions(rulings)
-	report := Record{"registry": []any{}, "tagged": 0, "removed": 0, "items": 0}
+	report := Record{"registry": []any{}, "tagged": 0, "removed": 0, "items": 0, "refused": []string{}}
 	for _, x := range rulings {
 		r := record(x)
 		if !contains([]string{"approve", "rework"}, str(r["verdict"])) {
@@ -315,17 +415,33 @@ func ApplyRulings(c Config, rulings []any, write bool) (Record, error) {
 		if name == "" || meaning == "" || reg.Spelling[Fold(name)] != "" {
 			continue
 		}
-		kind := TagKindOf(name)
-		if _, ok := reg.Data[kind]; !ok {
-			return nil, fmt.Errorf("no %q block in the registry", kind)
+		kind, key, err := placeIn(reg, name)
+		if err != nil {
+			// One unusable ruling is not a reason to drop ninety good ones on
+			// the floor, but it must be said out loud rather than skipped
+			// quietly: the tag it names goes on being proposed until somebody
+			// rules on it properly.
+			report["refused"] = append(texts(report["refused"]), name+": "+err.Error())
+			continue
 		}
-		_, bare := SplitTag(name)
-		nested(reg.Data, kind)[bare] = meaning
+		nested(reg.Data, kind)[key] = meaning
 		reg = NewRegistry(reg.Data)
 		report["registry"] = append(array(report["registry"]), []string{name, meaning})
 	}
 	for raw, target := range decided {
 		if target == "" {
+			// "Already in the registry" is a ruling *for* the tag, not against it.
+			// It reaches here because a creator's map sent the tag at a spelling
+			// the registry does not have, so `retag` took it off the item and
+			// proposed it; the adjudicator's answer is that the item was right.
+			// Resolving it to the registry's own spelling puts it back. Treating
+			// it as a bare drop instead cleared the proposal and left the
+			// recording without a tag the registry sanctions -- 66 of the 93
+			// rulings in one run here, and silent every time, because a tag that
+			// is never proposed again is a tag nobody is told about.
+			if canonical := reg.Spelling[Fold(raw)]; canonical != "" {
+				decided[raw] = canonical
+			}
 			continue
 		}
 		canonical := reg.Spelling[Fold(target)]

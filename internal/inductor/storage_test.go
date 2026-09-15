@@ -135,13 +135,28 @@ func TestAnalysisAdoptionAndConcurrentAudioAliases(t *testing.T) {
 		t.Fatal("lost aliases or model", r)
 	}
 }
-func TestRegistryRejectsUnregisteredTargetsAndAmbiguousBareTags(t *testing.T) {
+func TestTheRegistryOutranksAMapRowThatAnswersNothing(t *testing.T) {
 	r := NewRegistry(Record{"content": Record{"Known": ""}, "voice": Record{"Shared": "voice"}, "audience": Record{"Shared": "audience"}})
 	for _, tc := range []struct {
 		raw     string
 		mapping Record
 		want    string
-	}{{"Known", nil, "Known"}, {"Shared", nil, ""}, {"voice: shared", nil, "Voice: Shared"}, {"Known", Record{"Known": Record{"to": "Invented"}}, ""}, {"Known", Record{"Known": Record{"verdict": "drop"}}, ""}} {
+	}{
+		{"Known", nil, "Known"},
+		// A bare tag two namespaces both claim is a question, not a default.
+		{"Shared", nil, ""},
+		{"voice: shared", nil, "Voice: Shared"},
+		// A map may only point into the registry. One that points at something
+		// the registry has never heard of is not an answer, and must not cost
+		// the item a tag the registry does have: the registry rules on it as
+		// written. The row itself is a fault, and `check` says so.
+		{"Known", Record{"Known": Record{"to": "Invented"}}, "Known"},
+		// A tag the registry lacks and the row cannot place is still unresolved,
+		// which is what puts it to the adjudicator.
+		{"Unheard", Record{"Unheard": Record{"to": "Invented"}}, ""},
+		// A ruling to drop is an answer, and it stands.
+		{"Known", Record{"Known": Record{"verdict": "drop"}}, ""},
+	} {
 		got, _ := r.Resolve(tc.raw, tc.mapping)
 		if got != tc.want {
 			t.Errorf("%s => %q, want %q", tc.raw, got, tc.want)

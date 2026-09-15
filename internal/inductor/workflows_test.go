@@ -293,3 +293,106 @@ func TestAUnionFieldOneCreatorCuratedIsNotMarked(t *testing.T) {
 		t.Fatal("the creator's own tags were marked machine-made:", g)
 	}
 }
+func TestAMappingToATagTheRegistryLacksIsStillPending(t *testing.T) {
+	c := testConfig(t)
+	// The creator's map answers "humor" with "Humour", which the registry does
+	// not have. `retag` therefore drops the tag and proposes it; the adjudicator
+	// has to see it, or the proposal sits on the item for ever.
+	putRecord(t, MappingPath(c, "creator"), Record{"author": "creator", "mapping": []any{
+		Record{"tag": "humor", "verdict": "new", "to": "Humour"},
+		Record{"tag": "banter", "verdict": "drop"},
+		Record{"tag": "calm", "verdict": "map", "to": "Relaxation"},
+	}})
+	putRecord(t, filepath.Join(c.Content, "creator", "one.yaml"), Record{
+		"kind": "Item", "id": "one", "author": "creator", "title": "One",
+		"provenance": Record{"proposed_tags": []any{
+			Record{"tag": "humor", "why": "not in the registry"},
+			Record{"tag": "banter", "why": "not in the registry"},
+			Record{"tag": "calm", "why": "not in the registry"},
+		}}})
+	pending, err := PendingTags(c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending["humor"] == nil {
+		t.Fatal("a mapping onto a tag the registry lacks was treated as settled:", sortedKeys(pending))
+	}
+	if pending["banter"] != nil {
+		t.Fatal("a ruling to drop is an answer; it should not be asked again")
+	}
+	if pending["calm"] != nil {
+		t.Fatal("a mapping onto a registry tag is an answer; it should not be asked again")
+	}
+}
+func TestAlreadyInTheRegistryPutsTheTagBackOnTheItem(t *testing.T) {
+	c := testConfig(t)
+	// The map sent "Hypnosis" at a spelling the registry lacks, so retag took it
+	// off and proposed it. The adjudicator replies that the registry already has
+	// it -- which has to mean the item gets it back, not that the proposal is
+	// quietly binned.
+	putRecord(t, filepath.Join(c.Content, "creator", "one.yaml"), Record{
+		"kind": "Item", "id": "one", "author": "creator", "title": "One",
+		"tags": []string{"Relaxation"},
+		"provenance": Record{"proposed_tags": []any{
+			Record{"tag": "Hypnosis", "why": "not in the registry"},
+			Record{"tag": "Nonsense Word", "why": "not in the registry"},
+		}}})
+	rulings := []any{
+		Record{"tag": "Hypnosis", "verdict": "omit", "why": "Already in the registry."},
+		Record{"tag": "Nonsense Word", "verdict": "omit", "why": "Not a subject anyone browses by."},
+	}
+	if _, err := ApplyRulings(c, rulings, true); err != nil {
+		t.Fatal(err)
+	}
+	got := optionalYAML(filepath.Join(c.Content, "creator", "one.yaml"))
+	if !contains(texts(got["tags"]), "Hypnosis") {
+		t.Fatal("a tag ruled already-registered was not restored:", got["tags"])
+	}
+	if contains(texts(got["tags"]), "Nonsense Word") {
+		t.Fatal("a rejected tag reached the item:", got["tags"])
+	}
+	if truth(record(got["provenance"])["proposed_tags"]) {
+		t.Fatal("settled proposals should be cleared:", record(got["provenance"])["proposed_tags"])
+	}
+}
+func TestAQueuedTargetReachesTheAdjudicator(t *testing.T) {
+	c := testConfig(t)
+	// What a tagmap run leaves behind when the model wants a name the registry
+	// does not have: held outside `mapping`, so nothing resolves onto it, and
+	// picked up as a question rather than sitting in the file for ever.
+	putRecord(t, MappingPath(c, "creator"), Record{"author": "creator",
+		"mapping": []any{Record{"tag": "calm", "verdict": "map", "to": "Relaxation"}},
+		"pending": []any{Record{"tag": "Humour", "from": "humor", "count": 9,
+			"why": "comedy is the intent, not the tone"}}})
+	if m := LoadMapping(c, "creator"); m["Humour"] != nil || m["humor"] != nil {
+		t.Fatal("a queued target must not act as a mapping")
+	}
+	pending, err := PendingTags(c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending["Humour"] == nil {
+		t.Fatal("a queued target never reached the adjudicator:", sortedKeys(pending))
+	}
+	if n := integer(pending["Humour"]["count"]); n != 9 {
+		t.Fatal("the creator's usage count did not carry:", n)
+	}
+	if pending["Relaxation"] != nil {
+		t.Fatal("a target the registry already has is not a question")
+	}
+}
+func TestTagmapRowsMustPointIntoTheRegistry(t *testing.T) {
+	c := testConfig(t)
+	putRecord(t, MappingPath(c, "creator"), Record{"author": "creator", "mapping": []any{
+		Record{"tag": "calm", "verdict": "map", "to": "Relaxation"},
+		Record{"tag": "giggly", "verdict": "new", "to": "Humour"},
+		Record{"tag": "blues", "verdict": "drop"},
+	}})
+	got, err := DanglingMapTargets(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || str(got[0]["tag"]) != "giggly" || str(got[0]["to"]) != "Humour" {
+		t.Fatal("check should name exactly the row pointing outside the registry:", got)
+	}
+}

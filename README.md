@@ -58,11 +58,25 @@ are preserved.
 | Area | Commands |
 | --- | --- |
 | Import and processing | `check`, `add`, `ingest`, `run`, `transcribe` |
-| Tags and decisions | `retag`, `fold`, `tagmap`, `adjudicate`, `backfill`, `reconsider` |
+| Tags and decisions | `retag`, `fold`, `tagmap`, `adjudicate`, `registry`, `backfill`, `reconsider` |
 | Metadata and artwork | `retitle`, `authors`, `cover-prompts`, `artwork`, `attribute` |
 | Audio and speakers | `acoustic`, `acoustic-apply`, `voiceprint`, `similar` |
 | Library maintenance | `paths`, `orphans`, `migrate`, `export`, `duplicates` |
 | Model evaluation | `compare` |
+
+`registry` is the one that edits the vocabulary directly, for the decisions a
+model should not be making: `add`, `describe`, `remove`, `rename`, `merge`, and
+`bulk` for a file of those applied in order. Each keeps the rest of the library
+in step — the items carrying the tag, the `tags_added` a run recorded, the
+proposals still waiting on it, and every creator map that points at it — and
+records a ruling saying what was decided, so a later `adjudicate` does not
+re-open it.
+
+```sh
+inductor registry add "Humour" --description "Comedy is part of the intent." --write
+inductor registry merge "Toy" "Toys" --write
+inductor registry bulk changes.yaml --write
+```
 
 Every command accepts `--help`. Maintenance commands retain their original
 `--write` or `--dry-run` behavior; read their help before use. Output includes

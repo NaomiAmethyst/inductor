@@ -1010,5 +1010,163 @@
         "default": 40
       }
     ]
+  },
+  "registry/add": {
+    "options": [
+      {
+        "names": [
+          "tag"
+        ],
+        "help": "the tag exactly as it should be spelled, prefix and all"
+      },
+      {
+        "names": [
+          "--description"
+        ],
+        "help": "what the tag means; shown in the site's glossary"
+      },
+      {
+        "names": [
+          "--why"
+        ],
+        "help": "the reasoning, kept in the ruling ledger"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change; without it nothing is written"
+      }
+    ]
+  },
+  "registry/describe": {
+    "options": [
+      {
+        "names": [
+          "tag"
+        ],
+        "help": "an existing registry tag"
+      },
+      {
+        "names": [
+          "--description"
+        ],
+        "help": "the new meaning"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change; without it nothing is written"
+      }
+    ]
+  },
+  "registry/remove": {
+    "options": [
+      {
+        "names": [
+          "tag"
+        ],
+        "help": "an existing registry tag"
+      },
+      {
+        "names": [
+          "--why"
+        ],
+        "help": "the reasoning, kept in the ruling ledger"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change; without it nothing is written"
+      }
+    ]
+  },
+  "registry/rename": {
+    "options": [
+      {
+        "names": [
+          "tag new-name"
+        ],
+        "help": "the tag, then what it should be called"
+      },
+      {
+        "names": [
+          "--description"
+        ],
+        "help": "change the meaning at the same time"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change; without it nothing is written"
+      }
+    ]
+  },
+  "registry/merge": {
+    "options": [
+      {
+        "names": [
+          "tag survivor"
+        ],
+        "help": "the tag to absorb, then the one it becomes"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change; without it nothing is written"
+      }
+    ]
+  },
+  "registry": {
+    "options": []
+  },
+  "registry/bulk": {
+    "options": [
+      {
+        "names": [
+          "file"
+        ],
+        "help": "a TagBulkUpdate YAML file; changes are applied in the order written"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the changes; without it nothing is written"
+      }
+    ]
+  },
+  "registry/about": {
+    "options": [
+      {
+        "names": [
+          "namespace"
+        ],
+        "help": "voice, audience, induction, production, trigger, compulsion, cw or content"
+      },
+      {
+        "names": [
+          "--description"
+        ],
+        "help": "what this namespace is for; empty removes it"
+      },
+      {
+        "names": [
+          "--write"
+        ],
+        "action": "store_true",
+        "help": "make the change"
+      }
+    ]
   }
 }

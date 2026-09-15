@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,17 +97,20 @@ func ParseArgs(argv []string) (Arguments, error) {
 	if !ok {
 		return a, fmt.Errorf("unknown command %q", a.Command)
 	}
-	if a.Command == "transcribe" {
+	// A command with `<name>/<sub>` entries in the schema is a parent: it takes
+	// the subcommand as its first word. Read from the schema rather than listed
+	// here, so a new one is declared in exactly one place.
+	if subs := subcommandsOf(s, a.Command); len(subs) > 0 {
 		for i, v := range rest {
-			if contains([]string{"run", "status", "audit", "worker"}, v) {
+			if contains(subs, v) {
 				a.Command += "/" + v
 				spec.Options = append(spec.Options, s[a.Command].Options...)
 				rest = append(rest[:i], rest[i+1:]...)
 				break
 			}
 		}
-		if a.Command == "transcribe" && !contains(rest, "--help") && !contains(rest, "-h") {
-			return a, fmt.Errorf("transcribe requires run, status, audit, or worker")
+		if !strings.Contains(a.Command, "/") && !contains(rest, "--help") && !contains(rest, "-h") {
+			return a, fmt.Errorf("%s requires one of: %s", a.Command, strings.Join(subs, ", "))
 		}
 	}
 	byName := map[string]optionSpec{}
@@ -188,13 +192,29 @@ func ParseArgs(argv []string) (Arguments, error) {
 			a.Values[k] = v
 		}
 	}
-	if len(a.Positionals) > 0 && a.Command != "add" && a.Command != "transcribe/worker" {
+	if len(a.Positionals) > 0 && a.Command != "add" && a.Command != "transcribe/worker" &&
+		!strings.HasPrefix(a.Command, "registry/") {
 		return a, fmt.Errorf("unexpected arguments: %s", strings.Join(a.Positionals, " "))
 	}
 	if a.Command == "transcribe/worker" && !a.Help && (len(a.Positionals) != 1 || !contains([]string{"start", "stop", "kill", "log", "failures"}, a.Positionals[0])) {
 		return a, fmt.Errorf("worker requires start, stop, kill, log, or failures")
 	}
 	return a, nil
+}
+
+// subcommandsOf lists the words a parent command takes, in schema order.
+func subcommandsOf(s map[string]commandSpec, command string) []string {
+	if command == "" {
+		return nil
+	}
+	out := []string{}
+	for n := range s {
+		if strings.HasPrefix(n, command+"/") {
+			out = append(out, strings.TrimPrefix(n, command+"/"))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 func Help(w io.Writer, command string) {
 	fmt.Fprintln(w, "Inductor — build a Hypnotica content tree from audio.")
@@ -210,8 +230,15 @@ func Help(w io.Writer, command string) {
 	}
 	fmt.Fprintf(w, "\nUsage: inductor [-r ROOT] %s [OPTIONS]\n\n", strings.ReplaceAll(command, "/", " "))
 	spec := schema()[command]
-	if command == "transcribe" {
-		fmt.Fprintln(w, "Subcommands: run, status, audit, worker")
+	if subs := subcommandsOf(schema(), command); len(subs) > 0 {
+		fmt.Fprintf(w, "Subcommands: %s\n\n", strings.Join(subs, ", "))
+		for _, sub := range subs {
+			fmt.Fprintf(w, "  %s %s\n", command, sub)
+			for _, o := range schema()[command+"/"+sub].Options {
+				fmt.Fprintf(w, "      %-22s %s\n", strings.Join(o.Names, ", "), o.Help)
+			}
+		}
+		fmt.Fprintln(w)
 	}
 	for _, o := range spec.Options {
 		fmt.Fprintf(w, "  %-24s %s\n", strings.Join(o.Names, ", "), o.Help)
@@ -283,7 +310,11 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 				missing++
 			}
 		}
-		out := Record{"sources": len(r.Sources), "authors": authors, "audio_missing": missing, "audio_remote": remote, "errors": r.Errors, "warnings": r.Warnings}
+		dangling, err := DanglingMapTargets(c)
+		if err != nil {
+			return nil, err
+		}
+		out := Record{"sources": len(r.Sources), "authors": authors, "audio_missing": missing, "audio_remote": remote, "errors": r.Errors, "warnings": r.Warnings, "map_targets_missing": dangling}
 		if len(r.Errors) > 0 {
 			return out, fmt.Errorf("%d source error(s)", len(r.Errors))
 		}
@@ -351,6 +382,31 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 			model = c.Enrich.AdjudicatorModel
 		}
 		return e.Adjudicate(ctx, a.Bool("from_reviews"), a.Bool("collect"), model, p)
+	case "registry/add", "registry/describe", "registry/remove", "registry/rename", "registry/merge", "registry/bulk", "registry/about":
+		op := strings.TrimPrefix(a.Command, "registry/")
+		want := 1
+		if op == "rename" || op == "merge" {
+			want = 2
+		}
+		if len(a.Positionals) != want {
+			return nil, fmt.Errorf("registry %s takes %d argument(s); got %d",
+				op, want, len(a.Positionals))
+		}
+		switch op {
+		case "about":
+			return RegistryAbout(c, a.Positionals[0], a.String("description"), a.Bool("write"))
+		case "bulk":
+			return RegistryBulk(c, a.Positionals[0], a.Bool("write"))
+		case "add":
+			return RegistryAdd(c, a.Positionals[0], a.String("description"), a.String("why"), a.Bool("write"))
+		case "describe":
+			return RegistryDescribe(c, a.Positionals[0], a.String("description"), a.Bool("write"))
+		case "remove":
+			return RegistryRemove(c, a.Positionals[0], a.String("why"), a.Bool("write"))
+		case "rename":
+			return RegistryRename(c, a.Positionals[0], a.Positionals[1], a.String("description"), a.Bool("write"))
+		}
+		return RegistryMerge(c, a.Positionals[0], a.Positionals[1], a.Bool("write"))
 	case "backfill":
 		return Backfill(c, a.Strings("tag"), a.Bool("write"))
 	case "reconsider":
