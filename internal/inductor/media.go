@@ -132,6 +132,27 @@ func HoldsAudio(ctx context.Context, path string) bool {
 	b, e := command(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of", "csv=p=0", path)
 	return e == nil && strings.TrimSpace(string(b)) != ""
 }
+
+// ClearLink takes a symlink off a path this is about to write, and leaves
+// anything else alone.
+//
+// Some outputs are files this writes and never links to one -- a cover, above
+// all. Where a link has got to that path anyway, writing goes *through* it, and
+// a link pointing at itself answers the read with ELOOP. That is not
+// ErrNotExist, so AtomicWrite hands the error up, its caller hands it up, and
+// the work is reported as a failure to produce the thing rather than as the
+// broken link it is. A bad placement once pointed 119 covers at themselves and
+// 79 redraws could never land for this reason, with nothing in the log saying
+// why. The rename at the end of an atomic write would have replaced the link
+// happily; it never got that far, because the read comes first.
+func ClearLink(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	return os.Remove(path)
+}
+
 func Place(src, dest, mode string) (string, error) {
 	src = absolute(src)
 	dest = absolute(dest)

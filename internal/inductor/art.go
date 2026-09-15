@@ -203,6 +203,13 @@ func RenderGraph(engine, promptText, negative string, seed, width, height int) R
 	return graph
 }
 func (e *Engine) Generate(ctx context.Context, text, dest, negative string) error {
+	// An image is a file this writes, never a link to one, and writing through a
+	// link that points at itself fails before the rename that would have
+	// replaced it. Cleared here rather than at each call site because this is
+	// the one place the bytes land.
+	if err := ClearLink(dest); err != nil {
+		return err
+	}
 	c := e.Config
 	host := strings.TrimRight(str(first(c.Enrich.ComfyURL, os.Getenv("COMFY_URL"), "http://127.0.0.1:8188")), "/")
 	client := &http.Client{Timeout: 30 * time.Second}

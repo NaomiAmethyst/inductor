@@ -324,7 +324,14 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 			continue
 		}
 		w, h := imageSize(e.Config.Resolved(str(d.Data["cover"]), filepath.Dir(d.Path)))
-		if redo || (w > 0 && (w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight)) {
+		// A cover with no width is one that could not be read: gone, unreadable,
+		// or a link pointing at itself. The item says it has a cover and says
+		// this toolchain drew it, so the shape is not the only thing that can be
+		// wrong with it -- and the `w > 0` that used to guard this skipped
+		// exactly the covers most in need of drawing. Thirty-eight of them sat
+		// through every run of this command untouched, each one a warning in the
+		// build and a missing picture on the site.
+		if redo || w == 0 || w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight {
 			rows = append(rows, d)
 		}
 	}

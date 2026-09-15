@@ -137,3 +137,159 @@ func TestAddAndExportRoundTrip(t *testing.T) {
 		t.Fatal(sources, err)
 	}
 }
+func TestDuplicateMergeKeepsTheSurvivorsOwnProvenance(t *testing.T) {
+	c := testConfig(t)
+	audio := filepath.Join(c.Root, "audio.mp3")
+	putFile(t, audio, []byte("shared recording"))
+	fp, err := Fingerprint(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(c.Content, "creator", "title.yaml")
+	dropPath := filepath.Join(c.Content, "creator", "title-0.yaml")
+	// The survivor knows things about itself, including that it has already
+	// absorbed something once. The other document is *richer*, so the fold seeds
+	// the merged record from it -- which is exactly when the survivor's own
+	// provenance used to be dropped on the floor.
+	putRecord(t, keepPath, Record{"kind": "Item", "id": "public-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "description": "Written by the creator.",
+		"provenance": Record{"fingerprint": fp, "source_key": "first",
+			"archive_path": "Collection/MP3/one.mp3", "original_title": "One (mp3)",
+			"merged_source_keys": []string{"absorbed-earlier"}}})
+	putRecord(t, dropPath, Record{"kind": "Item", "id": "drop-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "source_url": "https://example.test/one/",
+		"summary": "A machine summary.", "tags": []string{"Hypnosis"},
+		"provenance": Record{"fingerprint": fp, "source_key": "second",
+			"generated": []string{"summary", "tags"}}})
+	groups, err := FindDuplicates(c.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ResolveDuplicates(groups[SameTitle], nil, c.Content, true, true); err != nil {
+		t.Fatal(err)
+	}
+	got := optionalYAML(keepPath)
+	p := record(got["provenance"])
+	if str(p["archive_path"]) != "Collection/MP3/one.mp3" {
+		t.Fatal("the survivor's archive_path went with the seed:", p)
+	}
+	if str(p["original_title"]) != "One (mp3)" {
+		t.Fatal("the survivor's original_title went with the seed:", p)
+	}
+	for _, want := range []string{"absorbed-earlier", "second"} {
+		if !contains(texts(p["merged_source_keys"]), want) {
+			t.Fatalf("merged_source_keys lost %q: %v", want, p["merged_source_keys"])
+		}
+	}
+	// The summary came from the other document, which said it wrote it.
+	if !contains(texts(p["generated"]), "summary") {
+		t.Fatal("a generated field that survived the merge is unmarked:", p["generated"])
+	}
+	// The description came from the survivor, which did not.
+	if contains(texts(p["generated"]), "description") {
+		t.Fatal("the creator's own description was marked machine-made:", p["generated"])
+	}
+}
+func TestAMergeWillNotMarkAValueTwoDocumentsDisagreeAbout(t *testing.T) {
+	c := testConfig(t)
+	audio := filepath.Join(c.Root, "audio.mp3")
+	putFile(t, audio, []byte("shared recording"))
+	fp, err := Fingerprint(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(c.Content, "creator", "title.yaml")
+	dropPath := filepath.Join(c.Content, "creator", "title-0.yaml")
+	// Both hold the same description. One says it generated it; the other, which
+	// is the survivor, does not. Marking it would tell the creator their own
+	// writing was machine-made, so the disagreement resolves to "unmarked".
+	shared := "The same words in both documents."
+	putRecord(t, keepPath, Record{"kind": "Item", "id": "public-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "description": shared,
+		"provenance": Record{"fingerprint": fp, "source_key": "first"}})
+	putRecord(t, dropPath, Record{"kind": "Item", "id": "drop-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "description": shared,
+		"source_url": "https://example.test/one/", "tags": []string{"Hypnosis"},
+		"provenance": Record{"fingerprint": fp, "source_key": "second",
+			"generated": []string{"description"}}})
+	groups, err := FindDuplicates(c.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ResolveDuplicates(groups[SameTitle], nil, c.Content, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if g := texts(record(optionalYAML(keepPath)["provenance"])["generated"]); contains(g, "description") {
+		t.Fatal("marked a description the survivor claims as its own:", g)
+	}
+}
+func TestAUnionFieldStaysMarkedWhenBothDocumentsWroteIt(t *testing.T) {
+	c := testConfig(t)
+	audio := filepath.Join(c.Root, "audio.mp3")
+	putFile(t, audio, []byte("shared recording"))
+	fp, err := Fingerprint(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(c.Content, "creator", "title.yaml")
+	dropPath := filepath.Join(c.Content, "creator", "title-0.yaml")
+	// Tags are merged as a union, so the survivor's tags match neither document's
+	// exactly. A rule that asks "which document held this value" therefore finds
+	// nobody and unmarks a field both of them said a model wrote.
+	putRecord(t, keepPath, Record{"kind": "Item", "id": "public-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "tags": []string{"Hypnosis"},
+		"provenance": Record{"fingerprint": fp, "source_key": "first",
+			"generated": []string{"tags"}}})
+	putRecord(t, dropPath, Record{"kind": "Item", "id": "drop-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "tags": []string{"Relaxation"},
+		"source_url": "https://example.test/one/",
+		"provenance": Record{"fingerprint": fp, "source_key": "second",
+			"generated": []string{"tags"}}})
+	groups, err := FindDuplicates(c.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ResolveDuplicates(groups[SameTitle], nil, c.Content, true, true); err != nil {
+		t.Fatal(err)
+	}
+	got := optionalYAML(keepPath)
+	for _, want := range []string{"Hypnosis", "Relaxation"} {
+		if !contains(texts(got["tags"]), want) {
+			t.Fatalf("the union lost %q: %v", want, got["tags"])
+		}
+	}
+	if g := texts(record(got["provenance"])["generated"]); !contains(g, "tags") {
+		t.Fatal("both documents wrote their tags; the merge unmarked them:", g)
+	}
+}
+func TestAUnionFieldOneCreatorCuratedIsNotMarked(t *testing.T) {
+	c := testConfig(t)
+	audio := filepath.Join(c.Root, "audio.mp3")
+	putFile(t, audio, []byte("shared recording"))
+	fp, err := Fingerprint(audio)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(c.Content, "creator", "title.yaml")
+	dropPath := filepath.Join(c.Content, "creator", "title-0.yaml")
+	// The survivor's tags are the creator's own. Merging a model's tags in
+	// alongside them must not relabel the creator's as machine-made.
+	putRecord(t, keepPath, Record{"kind": "Item", "id": "public-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "tags": []string{"Hypnosis"},
+		"provenance": Record{"fingerprint": fp, "source_key": "first"}})
+	putRecord(t, dropPath, Record{"kind": "Item", "id": "drop-id", "author": "creator",
+		"title": "Curated Title", "audio": audio, "tags": []string{"Relaxation"},
+		"source_url": "https://example.test/one/",
+		"provenance": Record{"fingerprint": fp, "source_key": "second",
+			"generated": []string{"tags"}}})
+	groups, err := FindDuplicates(c.Content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ResolveDuplicates(groups[SameTitle], nil, c.Content, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if g := texts(record(optionalYAML(keepPath)["provenance"])["generated"]); contains(g, "tags") {
+		t.Fatal("the creator's own tags were marked machine-made:", g)
+	}
+}

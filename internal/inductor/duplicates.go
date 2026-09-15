@@ -14,6 +14,9 @@ const SameTitle = "same title, one suffixed"
 const SameCreator = "same creator, different titles"
 const CrossCreator = "different creators"
 
+// Fields a merge takes from every document at once rather than from one.
+var unionFields = []string{"tags", "categories"}
+
 var numericSuffix = regexp.MustCompile(`-[0-9]+$`)
 var notTitle = regexp.MustCompile(`(?i)mixdown|_h265|-h265|[-_](hq|lq)$|[\s._-]mp3$|\.(mp3|wav|m4a)\b|femdom erotic hypnosis|fdhypno|\.com\b`)
 var runTogether = regexp.MustCompile(`(?i)^[a-z0-9]{10,}$`)
@@ -97,7 +100,7 @@ func MergeDuplicate(keep, drop Record) Record {
 			m[k] = v
 		}
 	}
-	for _, k := range []string{"tags", "categories"} {
+	for _, k := range unionFields {
 		a := uniqueStrings(append(texts(m[k]), texts(drop[k])...))
 		if len(a) > 0 {
 			m[k] = a
@@ -113,6 +116,102 @@ func MergeDuplicate(keep, drop Record) Record {
 	}
 	return m
 }
+
+// MergeProvenance builds the survivor's provenance from the whole group.
+//
+// It exists because the obvious thing does not work. `MergeDuplicate` skips
+// provenance on purpose -- provenance is about where a *document* came from,
+// and gap-filling it field by field between two documents would invent a
+// history neither of them has. But the fold seeds the merged record from the
+// richest document in the group, which is often not the survivor, and the
+// survivor's identity is then stamped back on afterwards. Everything else the
+// survivor's provenance knew went with the seed: `archive_path`, `demuxed`,
+// `original_title`, `titled_by`, and -- worse -- `merged_source_keys`, the
+// record of a fold that already happened. Folding a group twice would erase the
+// first fold's evidence.
+//
+// So: the survivor's provenance is the base, and a key it does not have is
+// taken from the others in rank order. The one key that cannot be treated that
+// way is `generated`.
+//
+// `generated` names the fields this toolchain wrote rather than found, and the
+// merged record takes its fields from several documents. A union over-marks and
+// the survivor's own list under-marks, and those two errors are not equal:
+// marking a field generated that a person actually wrote tells them their own
+// writing was machine-made, which is the error this library rules out first. So
+// a field is marked here only when the value that survived demonstrably came
+// from a document that marked it -- and not when any document holding that same
+// value declined to.
+func MergeProvenance(winner Document, group []Document, merged Record) Record {
+	out := clone(record(winner.Data["provenance"]))
+	rest := []Document{}
+	for _, d := range group {
+		if d.Path != winner.Path {
+			rest = append(rest, d)
+		}
+	}
+	sort.SliceStable(rest, func(i, j int) bool {
+		return rankGreater(Richness(rest[i].Data), Richness(rest[j].Data))
+	})
+	for _, d := range rest {
+		for k, v := range record(d.Data["provenance"]) {
+			if k == "generated" {
+				continue
+			}
+			if !truth(out[k]) && truth(v) {
+				out[k] = v
+			}
+		}
+	}
+	// A field is marked only if every document that put something into the
+	// merged value said it wrote that something. What counts as putting
+	// something in depends on the field: a union field takes from everyone who
+	// holds one, and every other field takes from whoever held the value that
+	// survived. Two documents that disagree about a field they both hold leave
+	// it unmarked, which is the direction that cannot misattribute a person's
+	// writing to a machine.
+	named := map[string]bool{}
+	for _, d := range group {
+		for _, f := range texts(record(d.Data["provenance"])["generated"]) {
+			named[f] = true
+		}
+	}
+	made := []string{}
+	for f := range named {
+		all, any := true, false
+		for _, d := range group {
+			listed := contains(texts(record(d.Data["provenance"])["generated"]), f)
+			gave := sameValue(merged[f], d.Data[f])
+			if contains(unionFields, f) {
+				gave = truth(d.Data[f])
+			}
+			if !gave {
+				continue
+			}
+			any = true
+			all = all && listed
+		}
+		if any && all {
+			made = append(made, f)
+		}
+	}
+	sort.Strings(made)
+	if len(made) > 0 {
+		out["generated"] = made
+	} else {
+		delete(out, "generated")
+	}
+	return out
+}
+
+// sameValue compares two document fields without caring how YAML typed them.
+func sameValue(a, b any) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return fmt.Sprintf("%v", a) == fmt.Sprintf("%v", b)
+}
+
 func ResolveDuplicates(groups [][]Document, decisions map[string]bool, content string, fold, write bool) ([]string, error) {
 	winners := make([]Document, len(groups))
 	manual := make([]bool, len(groups))
@@ -227,6 +326,7 @@ func ResolveDuplicates(groups [][]Document, decisions map[string]bool, content s
 				delete(merged, f)
 			}
 		}
+		merged["provenance"] = MergeProvenance(winner, g, merged)
 		p := nested(merged, "provenance")
 		wp := record(winner.Data["provenance"])
 		for _, f := range []string{"source_key", "fingerprint"} {

@@ -317,3 +317,40 @@ func TestCheckDoesNotCreateCache(t *testing.T) {
 		t.Fatal("check created disposable cache")
 	}
 }
+func TestASelfPointingLinkDoesNotBlockTheWriteUnderIt(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "cover.png")
+	// Exactly the shape a bad placement left behind: a link whose target, once
+	// the ".." are folded away, is the link itself.
+	if err := os.Symlink(filepath.Join(dir, "sub", "..", "cover.png"), dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := AtomicWrite(dest, []byte("drawn"), 0644); err == nil {
+		t.Fatal("expected the write through a self-pointing link to fail; " +
+			"if this stops failing, ClearLink's reason for existing has changed")
+	}
+	if err := ClearLink(dest); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+		t.Fatal("ClearLink left the link in place")
+	}
+	if _, err := AtomicWrite(dest, []byte("drawn"), 0644); err != nil {
+		t.Fatal("the write should land once the link is off:", err)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != "drawn" {
+		t.Fatalf("wrong content after the redraw: %q", b)
+	}
+}
+func TestClearLinkLeavesARealFileAlone(t *testing.T) {
+	dest := filepath.Join(t.TempDir(), "cover.png")
+	if _, err := AtomicWrite(dest, []byte("a drawn cover"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearLink(dest); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(dest); string(b) != "a drawn cover" {
+		t.Fatal("ClearLink removed a real file")
+	}
+}
