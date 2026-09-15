@@ -326,3 +326,31 @@ func TestRegistryAboutSetsWhatANamespaceIsFor(t *testing.T) {
 		t.Fatal("only the eight namespaces have an _about")
 	}
 }
+func TestABareWordRowDoesNotCatchANamespacedRegistryTag(t *testing.T) {
+	r := NewRegistry(Record{
+		"content":  Record{"Moaning": "Moaning.", "Relaxation": "Relaxing."},
+		"trigger":  Record{"Moans": "The speaker's moaning acts as the cue."},
+		"audience": Record{"sissy": "Addressed to a man being feminised."}})
+	m := Record{"Moans": Record{"verdict": "map", "to": "Moaning"}}
+	// The creator's row is about their own bare word.
+	if got, _ := r.Resolve("Moans", m); got != "Moaning" {
+		t.Fatal("the row should still answer for the creator's own spelling:", got)
+	}
+	// It is not about the registry's trigger of the same name.
+	if got, _ := r.Resolve("Trigger: Moans", m); got != "Trigger: Moans" {
+		t.Fatal("a bare row rewrote a namespaced registry tag:", got)
+	}
+	// Nor does it reach a namespaced tag the registry does spell out. Once a tag
+	// is the registry's own spelling on an item, the way to rule on it is to
+	// name it in full -- which is what "the registry wins" means here.
+	if got, _ := r.Resolve("Audience: sissy", Record{"sissy": Record{"verdict": "drop"}}); got != "Audience: sissy" {
+		t.Fatal("a bare row reached a canonical registry tag:", got)
+	}
+	if got, _ := r.Resolve("Audience: sissy", Record{"Audience: sissy": Record{"verdict": "drop"}}); got != "" {
+		t.Fatal("a row naming the tag in full must still rule on it:", got)
+	}
+	// The fallback remains for a namespaced spelling the registry never had.
+	if got, _ := r.Resolve("Production: No Binaurals", Record{"No Binaurals": Record{"verdict": "map", "to": "Relaxation"}}); got != "Relaxation" {
+		t.Fatal("the fallback should still place a spelling the registry lacks:", got)
+	}
+}

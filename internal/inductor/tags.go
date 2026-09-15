@@ -115,7 +115,17 @@ func (r *Registry) Resolve(tag string, mapping Record) (string, string) {
 		return "", "dropped"
 	}
 	prefix, value := SplitTag(raw)
-	entry := record(first(mapping[raw], mapping[value]))
+	entry := record(mapping[raw])
+	if len(entry) == 0 && r.Spelling[Fold(raw)] == "" {
+		// The bare-word fallback is for a tag the registry does not know: a
+		// creator writing "sissy" should still meet their row for it once the
+		// pipeline has written it as "Audience: sissy". It must not reach a tag
+		// the registry knows in full, though -- one creator's row for their own
+		// word "Moans" caught the registry's "Trigger: Moans" and turned a
+		// trigger into a content tag on sixteen recordings. A tag the registry
+		// spells out is already resolved; only its own row may speak for it.
+		entry = record(mapping[value])
+	}
 	if len(entry) > 0 {
 		if strings.ToLower(str(entry["verdict"])) == "drop" {
 			return "", "dropped"
