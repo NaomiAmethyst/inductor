@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-const Version = "0.1.0"
+var Version = "0.1.0"
 
 //go:embed cli_schema.json
 var cliSchema []byte

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"unicode"
 )
 
@@ -77,11 +76,10 @@ func (c *FingerprintCache) Of(path string) (string, error) {
 	if e != nil {
 		return "", e
 	}
-	info, ok := s.Sys().(*syscall.Stat_t)
+	key, ok := fileIdentity(path, s)
 	if !ok {
 		return Fingerprint(path)
 	}
-	key := fmt.Sprintf("%d:%d", info.Dev, info.Ino)
 	c.mu.Lock()
 	row := array(c.entries[key])
 	if len(row) == 3 && str(row[0]) == fmt.Sprint(s.Size()) && str(row[1]) == fmt.Sprint(s.ModTime().UnixNano()) {

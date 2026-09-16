@@ -11,7 +11,8 @@ results remain usable.
 
 ## Build
 
-Requires Go 1.24 or later on Linux. FFmpeg and ffprobe are needed for audio
+Requires Go 1.24 or later. CI builds Linux, Windows, and macOS binaries for
+AMD64 and ARM64. FFmpeg and ffprobe are needed for audio
 inspection, conversion, and measurements. SSH and SCP are needed for a remote
 worker. Python 3.10 or later is needed on the worker machine.
 
@@ -23,6 +24,48 @@ bin/inductor --help
 No Python installation is needed to run metadata, tagging, cache, or document
 maintenance commands. Worker scripts and model prompts are embedded in the Go
 binary.
+
+## Downloads and containers
+
+Every successful push or pull request build provides six binary archives under
+[GitHub Actions](https://github.com/NaomiAmethyst/inductor/actions), retained for
+30 days. Each archive includes license notices and comes with a SHA-256 checksum file.
+Windows downloads are ZIP files; Linux and macOS downloads are `.tar.gz` files.
+Pushing a `v*` tag also publishes the archives and `checksums.txt` on
+[GitHub Releases](https://github.com/NaomiAmethyst/inductor/releases).
+
+Images are published to `ghcr.io/naomiamethyst/inductor` on successful pushes.
+Both variants support Linux AMD64 and ARM64:
+
+| Tag on the default branch | Contents |
+| --- | --- |
+| `latest`, `ffmpeg` | Inductor, FFmpeg/ffprobe, CA certificates, SSH/SCP |
+| `scratch` | Inductor and CA certificates, built from `scratch` |
+
+Each variant also gets `<branch>-ffmpeg` / `<branch>-scratch`,
+`sha-<full-commit>-ffmpeg` / `sha-<full-commit>-scratch`, and, for tag pushes,
+`<tag>-ffmpeg` / `<tag>-scratch` (for example, `v1.2.3-scratch`).
+Pull requests and manual workflow runs build images without publishing them.
+
+```sh
+docker run --rm -v "$PWD:/library" ghcr.io/naomiamethyst/inductor:ffmpeg check
+docker run --rm -v "$PWD:/library" ghcr.io/naomiamethyst/inductor:scratch --help
+```
+
+The scratch image supports commands that need only the Go binary, including
+metadata maintenance and HTTPS API calls. Media processing needs the FFmpeg
+variant. Neither image includes Python or inference models: use a remote worker
+with the FFmpeg variant for transcription and voice embeddings. Native Windows
+builds also need a remote Unix worker; the local worker uses a POSIX shell and
+Unix file locking. Standalone binaries need FFmpeg/ffprobe installed separately
+for media operations.
+
+To build containers locally, the default target includes FFmpeg:
+
+```sh
+docker build --target runtime-ffmpeg -t inductor:ffmpeg .
+docker build --target runtime-scratch -t inductor:scratch .
+```
 
 ## Start a library
 

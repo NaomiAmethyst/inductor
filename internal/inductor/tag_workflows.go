@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -48,15 +47,16 @@ func AppendLedger(path string, rows []Record) (int, error) {
 	if e := os.MkdirAll(filepath.Dir(path), 0755); e != nil {
 		return 0, e
 	}
-	f, e := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	// Windows needs read access to lock a handle opened for append-only writes.
+	f, e := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0644)
 	if e != nil {
 		return 0, e
 	}
 	defer f.Close()
-	if e = syscall.Flock(int(f.Fd()), syscall.LOCK_EX); e != nil {
+	if e = lockFile(f); e != nil {
 		return 0, e
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer unlockFile(f)
 	if _, e = f.Write(b.Bytes()); e != nil {
 		return 0, e
 	}

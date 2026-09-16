@@ -1,7 +1,8 @@
-name: Test
-on: [push, pull_request]
+name: Test and publish
+on: [push, pull_request, workflow_dispatch]
 permissions:
   contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,7 +16,165 @@ jobs:
         with:
           python-version: '3.12'
       - run: sudo apt-get update && sudo apt-get install -y ffmpeg
-      - run: python -m pip install pyyaml mutagen numpy av pillow pytest
+      - run: python -m pip install numpy av
       - run: make test vet build test-worker
       - run: test -z "$(gofmt -l cmd internal/inductor)"
       - run: bin/inductor --help
+
+  portability:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Test native file identity and concurrent ledger writes
+        run: go test ./internal/inductor -run '^(TestFingerprintIgnoresMetadataAndSurvivesRename|TestLedgerConcurrentAppendAndLatestRuling)$' -count=1
+      - run: go run ./cmd/inductor --help
+
+  binaries:
+    needs: [test, portability]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, darwin]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build and package
+        env:
+          TARGET_OS: ${{ matrix.os }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          version="sha-${GITHUB_SHA}"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+          fi
+          bash scripts/build-release.sh "$TARGET_OS" "$TARGET_ARCH" "$version"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inductor-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  containers:
+    needs: [test, portability, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [ffmpeg, scratch]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.repository == 'NaomiAmethyst/inductor'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/naomiamethyst/inductor
+          flavor: latest=false
+          tags: |
+            type=sha,format=long,suffix=-${{ matrix.variant }}
+            type=ref,event=branch,suffix=-${{ matrix.variant }}
+            type=ref,event=tag,suffix=-${{ matrix.variant }}
+            type=ref,event=pr,suffix=-${{ matrix.variant }}
+            type=raw,value=${{ matrix.variant }},enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && matrix.variant == 'ffmpeg' }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/NaomiAmethyst/inductor
+      - name: Build version
+        id: version
+        run: |
+          version="sha-${GITHUB_SHA}"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Build native image for smoke tests
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime-${{ matrix.variant }}
+          platforms: linux/amd64
+          load: true
+          tags: inductor:smoke-${{ matrix.variant }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+      - name: Test container runtime
+        env:
+          VARIANT: ${{ matrix.variant }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          image="inductor:smoke-$VARIANT"
+          test "$(docker run --rm "$image" --version)" = "$VERSION"
+          docker run --rm "$image" --help > /dev/null
+          if [[ "$VARIANT" == ffmpeg ]]; then
+            docker run --rm --entrypoint ffprobe "$image" -version
+            docker run --rm --entrypoint ffmpeg "$image" \
+              -v error -f lavfi -i sine=frequency=440:duration=0.1 -f null -
+          fi
+      - name: Build and publish both architectures
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime-${{ matrix.variant }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' && github.repository == 'NaomiAmethyst/inductor' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && github.repository == 'NaomiAmethyst/inductor'
+    needs: [binaries, containers]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: inductor-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release downloads
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cd dist
+          cat *.sha256 > checksums.txt
+          sha256sum --check checksums.txt
+          if ! gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            options=()
+            if [[ "$RELEASE_TAG" == *-* ]]; then
+              options+=(--prerelease)
+            fi
+            gh release create "$RELEASE_TAG" --verify-tag --generate-notes "${options[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" ./*.tar.gz ./*.zip checksums.txt --clobber

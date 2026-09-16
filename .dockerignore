@@ -9,3 +9,4 @@ reference
 **/*_test.go
 internal/inductor/testdata
 internal/inductor/workers/test_*.py
+dist
