@@ -408,3 +408,56 @@ func TestPlanningTakesEveryAuthorNamedAndAllOfThemWhenNoneIs(t *testing.T) {
 		t.Fatal("naming an unknown creator should plan nothing, got", got)
 	}
 }
+
+func TestArtIsStaleWhenItsPromptIsRestated(t *testing.T) {
+	made := Record{"tagged": "violet smoke, tarot", "natural": "A violet room.", "font": "heavy-sans"}
+	// The picture on disk was drawn from exactly these words, so nothing to do.
+	if !SamePrompt(Record{"tagged": "violet smoke, tarot", "natural": "A violet room.", "font": "heavy-sans"}, made) {
+		t.Fatal("an unchanged prompt should not call the art stale")
+	}
+	// Whitespace is not a different instruction.
+	if !SamePrompt(Record{"tagged": " violet smoke, tarot ", "natural": "A violet room.\n", "font": "heavy-sans"}, made) {
+		t.Fatal("whitespace should not call the art stale")
+	}
+	// Any of the three fields the renderer reads is enough to change the picture.
+	for _, changed := range []Record{
+		{"tagged": "green smoke, tarot", "natural": "A violet room.", "font": "heavy-sans"},
+		{"tagged": "violet smoke, tarot", "natural": "A green room.", "font": "heavy-sans"},
+		{"tagged": "violet smoke, tarot", "natural": "A violet room.", "font": "slab"},
+	} {
+		if SamePrompt(changed, made) {
+			t.Fatalf("a restated prompt should call the art stale: %v", changed)
+		}
+	}
+	// A creator who has never had a prompt has nothing the picture could match.
+	if SamePrompt(Record{}, made) || SamePrompt(nil, made) {
+		t.Fatal("a missing prompt should call the art stale")
+	}
+}
+
+func TestArtRemembersTheWordsThatDrewIt(t *testing.T) {
+	prov := Record{}
+	StampArt(prov, "violet smoke, tarot", "blurry", "turbo")
+	if str(record(prov["image_from"])["engine"]) != "turbo" || str(record(prov["image_from"])["prompt"]) == "" {
+		t.Fatal("the stamp records neither engine nor prompt", prov)
+	}
+	if ArtStale(prov, "violet smoke, tarot", "blurry", "turbo") {
+		t.Fatal("the same instruction should not read as stale")
+	}
+	// Each half of the instruction, and the engine that picks the wording, is
+	// enough to make a different picture.
+	for _, c := range [][3]string{
+		{"green smoke, tarot", "blurry", "turbo"},
+		{"violet smoke, tarot", "washed out", "turbo"},
+		{"violet smoke, tarot", "blurry", "flux"},
+	} {
+		if !ArtStale(prov, c[0], c[1], c[2]) {
+			t.Fatalf("a changed instruction should read as stale: %v", c)
+		}
+	}
+	// Every picture drawn before this was recorded carries no stamp. Calling
+	// those stale would order the whole library redrawn over a missing field.
+	if ArtStale(Record{}, "anything", "", "turbo") {
+		t.Fatal("an unstamped picture must not read as stale")
+	}
+}

@@ -156,6 +156,13 @@
     "options": [
       {
         "names": [
+          "--author"
+        ],
+        "action": "append",
+        "help": "just this creator id (repeatable)"
+      },
+      {
+        "names": [
           "--limit"
         ],
         "type": "int",

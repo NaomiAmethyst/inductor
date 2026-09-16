@@ -4,8 +4,10 @@ package inductor
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/crypto/blake2b"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/opentype"
@@ -146,6 +148,36 @@ func DrawNameplate(path, text, faceName string, title bool) (bool, error) {
 	}
 	return AtomicWrite(path, out.Bytes(), 0644)
 }
+
+// ArtKey digests the instruction that drew a picture -- the prompt as the
+// renderer received it, the negative beside it, and the engine that chose
+// between the tagged and natural wordings.
+func ArtKey(text, negative, engine string) string {
+	h, _ := blake2b.New(16, nil)
+	_, _ = h.Write([]byte(strings.TrimSpace(text) + "\x00" + strings.TrimSpace(negative) + "\x00" + strings.ToLower(strings.TrimSpace(engine))))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// StampArt records what actually drew the picture, beside the `synopsis_from`
+// that has always done the same for the written half. Without it a document
+// carries a prompt and a picture with nothing to say they belong together, and
+// a prompt rewritten later leaves the two describing different things silently.
+func StampArt(prov Record, text, negative, engine string) {
+	prov["image_from"] = Record{"prompt": ArtKey(text, negative, engine), "engine": engine}
+}
+
+// ArtStale says whether the picture was drawn from words that have since moved
+// on. An unstamped picture is *not* called stale: every image made before this
+// was recorded is unstamped, and answering otherwise would order the whole
+// library redrawn on the strength of a missing field rather than a changed one.
+func ArtStale(prov Record, text, negative, engine string) bool {
+	was := record(prov["image_from"])
+	if len(was) == 0 {
+		return false
+	}
+	return str(was["prompt"]) != ArtKey(text, negative, engine)
+}
+
 func PromptFor(final Record, engine string, item Record) (string, string) {
 	kept := record(item["cover_prompts"])
 	tagged := strings.TrimSpace(str(first(kept["tagged"], final["thumbnail_prompt"])))
@@ -309,9 +341,11 @@ func (e *Engine) RenderCover(ctx context.Context, item, final Record, redraw boo
 	if exists(dest) && !redraw {
 		return dest, nil
 	}
-	if err := e.Generate(ctx, p, dest, str(record(item["cover_prompts"])["negative"])); err != nil {
+	negative := str(record(item["cover_prompts"])["negative"])
+	if err := e.Generate(ctx, p, dest, negative); err != nil {
 		return "", err
 	}
+	StampArt(nested(item, "provenance"), p, negative, e.Config.Enrich.CoverEngine)
 	_, err := DrawNameplate(dest, str(item["title"]), e.CoverFont(str(item["author"])), true)
 	return dest, err
 }

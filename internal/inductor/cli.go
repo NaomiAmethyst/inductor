@@ -432,7 +432,7 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 		if model == "" {
 			model = c.Enrich.AnalysisModel
 		}
-		return e.Authors(ctx, AuthorOptions{Model: model, Limit: a.Int("limit"), Redo: a.Bool("redo"), KeepSynopsis: a.Bool("keep_synopsis"), Render: !a.Bool("no_render"), Write: a.Bool("write"), Workers: 4})
+		return e.Authors(ctx, AuthorOptions{Only: a.Strings("author"), Model: model, Limit: a.Int("limit"), Redo: a.Bool("redo"), KeepSynopsis: a.Bool("keep_synopsis"), Render: !a.Bool("no_render"), Write: a.Bool("write"), Workers: 4})
 	case "artwork":
 		return e.Artwork(ctx, a.String("author"), a.Int("limit"), a.Int("workers"), a.Bool("redo"), a.Bool("write"))
 	case "similar":

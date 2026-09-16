@@ -73,6 +73,22 @@ func AuthorMaterial(author string, doc, work Record) string {
 	}
 	return strings.Join(parts, "\n")
 }
+
+// SamePrompt says whether two author prompts would draw the same picture. Only
+// the three fields the renderer reads count: a prompt that differs anywhere in
+// them is a different instruction, and the art made from the old one is stale.
+func SamePrompt(was, now Record) bool {
+	if len(was) == 0 {
+		return false
+	}
+	for _, f := range []string{"tagged", "natural", "font"} {
+		if strings.TrimSpace(str(was[f])) != strings.TrimSpace(str(now[f])) {
+			return false
+		}
+	}
+	return true
+}
+
 func SynopsisStale(doc Record, count int) bool {
 	if strings.TrimSpace(str(doc["synopsis"])) == "" {
 		return true
@@ -128,6 +144,7 @@ func VoiceAndTags(work Record) string {
 }
 
 type AuthorOptions struct {
+	Only                              []string
 	Model                             string
 	Limit                             int
 	Redo, KeepSynopsis, Render, Write bool
@@ -148,7 +165,11 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 		if d.Kind != "author" {
 			continue
 		}
-		work := BodyOfWork(docs, str(first(d.Data["id"], filepath.Base(filepath.Dir(d.Path)))))
+		who := str(first(d.Data["id"], filepath.Base(filepath.Dir(d.Path))))
+		if len(o.Only) > 0 && !contains(o.Only, who) {
+			continue
+		}
+		work := BodyOfWork(docs, who)
 		if o.Redo || SynopsisStale(d.Data, integer(work["count"])) || !truth(d.Data["image"]) {
 			rows = append(rows, authorJob{d, work})
 		}
@@ -211,12 +232,21 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 		}
 		for i, j := range part {
 			if p := found[i]; p != nil {
+				// The picture is made from these words, so words that have
+				// changed leave the picture describing the creator this page
+				// used to be about -- and provenance still calls the image ours.
+				restated := !SamePrompt(record(j.Doc.Data["cover_prompts"]), p)
 				j.Doc.Data["cover_prompts"] = p
 				report["prompted"] = integer(report["prompted"]) + 1
-				if o.Render && (o.Redo || !truth(j.Doc.Data["image"])) && o.Write {
+				engine := e.Config.Enrich.CoverEngine
+				text, _ := PromptFor(nil, engine, j.Doc.Data)
+				// Two ways to know the picture is behind: the words we just
+				// wrote differ from the words on the page, or the stamp says
+				// the picture was drawn from something else again.
+				stale := restated || ArtStale(record(j.Doc.Data["provenance"]), text, "", engine)
+				if o.Render && (o.Redo || stale || !truth(j.Doc.Data["image"])) && o.Write {
 					dest := filepath.Join(e.Config.Covers, str(j.Doc.Data["id"]), "_author.png")
-					text, _ := PromptFor(nil, e.Config.Enrich.CoverEngine, j.Doc.Data)
-					if o.Redo || !exists(dest) {
+					if o.Redo || stale || !exists(dest) {
 						err = e.Generate(ctx, text, dest, "")
 						if err != nil {
 							e.Say("author art %s: %v", str(j.Doc.Data["id"]), err)
@@ -228,6 +258,7 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 						if _, err = DrawNameplate(dest, str(first(j.Doc.Data["name"], j.Doc.Data["id"])), str(p["font"]), false); err != nil {
 							return report, err
 						}
+						StampArt(nested(j.Doc.Data, "provenance"), text, "", engine)
 					}
 					j.Doc.Data["image"] = e.Config.Portable(dest, filepath.Dir(j.Doc.Path))
 					MarkGenerated(nested(j.Doc.Data, "provenance"), "image")
@@ -343,12 +374,21 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		return report, nil
 	}
 	_, errs := parallelMap(ctx, rows, workers, func(ctx context.Context, d Document) (bool, error) {
-		p, _ := PromptFor(nil, e.Config.Enrich.CoverEngine, d.Data)
+		engine := e.Config.Enrich.CoverEngine
+		p, _ := PromptFor(nil, engine, d.Data)
 		dest := e.Config.Resolved(str(d.Data["cover"]), filepath.Dir(d.Path))
 		if err := e.Generate(ctx, p, dest, ""); err != nil {
 			return false, err
 		}
-		return DrawNameplate(dest, str(d.Data["title"]), e.CoverFont(str(d.Data["author"])), true)
+		ok, err := DrawNameplate(dest, str(d.Data["title"]), e.CoverFont(str(d.Data["author"])), true)
+		if err != nil {
+			return ok, err
+		}
+		// The picture changed even though its path did not, so the document has
+		// to be written back for the stamp to survive the run.
+		StampArt(nested(d.Data, "provenance"), p, "", engine)
+		_, err = SaveDocument(d.Path, d.Data)
+		return ok, err
 	})
 	for _, err := range errs {
 		if err != nil {
