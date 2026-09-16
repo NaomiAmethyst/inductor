@@ -32,6 +32,16 @@ func TestCLICommandsAndValidation(t *testing.T) {
 	if err != nil || !equivalent(a.Strings("stage"), []string{"media", "emit"}) {
 		t.Fatal(a, err)
 	}
+	// Both commands share one handler, which reads --author as a list. A flag
+	// left storing a single string reads back as an empty list there, and an
+	// empty list means every author -- so a run asked for one creator would
+	// quietly do the whole library. Both have to collect.
+	for _, command := range []string{"run", "ingest"} {
+		a, err := ParseArgs([]string{command, "--author", "one", "--author", "two"})
+		if err != nil || !equivalent(a.Strings("author"), []string{"one", "two"}) {
+			t.Fatalf("%s --author does not collect: %v %v", command, a.Values["author"], err)
+		}
+	}
 }
 func TestGraphValidationAndBatchPlanning(t *testing.T) {
 	for _, g := range [][]Artifact{{{Name: "a", Needs: []string{"missing"}}}, {{Name: "a", Needs: []string{"b"}}, {Name: "b", Needs: []string{"a"}}}, {{Name: "a"}, {Name: "a"}}} {

@@ -17,7 +17,7 @@ type Planned struct {
 	Stem, Path string
 }
 type PlanOptions struct {
-	Author      string
+	Authors     []string
 	Limit       int
 	Needs       []string
 	Redo, Fresh bool
@@ -82,7 +82,7 @@ func PlanSources(c Config, report SourceReport, index *ItemIndex, fp *Fingerprin
 	seen := map[string]bool{}
 	for _, s := range report.Sources {
 		a := s.AuthorID()
-		if o.Author != "" && a != o.Author {
+		if len(o.Authors) > 0 && !contains(o.Authors, a) {
 			continue
 		}
 		spellings := []string{s.Audio, c.Portable(s.Audio, "")}

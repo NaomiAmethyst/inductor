@@ -369,3 +369,42 @@ func TestClearLinkLeavesARealFileAlone(t *testing.T) {
 		t.Fatal("ClearLink removed a real file")
 	}
 }
+
+func TestPlanningTakesEveryAuthorNamedAndAllOfThemWhenNoneIs(t *testing.T) {
+	c := testConfig(t)
+	for _, who := range []string{"Alpha", "Beta", "Gamma"} {
+		audio := filepath.Join(c.Root, who+".mp3")
+		putFile(t, audio, bytes.Repeat([]byte(who), 100))
+		putRecord(t, filepath.Join(c.Sources, who+".yaml"),
+			Record{"audio": audio, "title": who + " Title", "author": who})
+	}
+	e := NewEngine(c)
+	defer e.Close()
+	sources, err := LoadSources(c.Sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planned := func(who ...string) []string {
+		jobs, err := PlanSources(c, sources, e.Index, e.Fingerprints, PlanOptions{Authors: who})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := []string{}
+		for _, j := range jobs {
+			out = append(out, j.Source.AuthorID())
+		}
+		return out
+	}
+	if got := planned(); len(got) != 3 {
+		t.Fatal("naming nobody should plan everybody, got", got)
+	}
+	if got := planned("alpha"); !equivalent(got, []string{"alpha"}) {
+		t.Fatal("naming one should plan only that one, got", got)
+	}
+	if got := planned("alpha", "gamma"); !equivalent(got, []string{"alpha", "gamma"}) {
+		t.Fatal("naming two should plan both, got", got)
+	}
+	if got := planned("nobody"); len(got) != 0 {
+		t.Fatal("naming an unknown creator should plan nothing, got", got)
+	}
+}

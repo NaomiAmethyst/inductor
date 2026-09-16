@@ -41,7 +41,7 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (Record, error)
 		}
 	}
 	redo := a.Bool("redo") || a.Bool("redo_analysis") || a.Bool("overwrite")
-	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{Author: a.String("author"), Limit: a.Int("limit"), Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
+	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{Authors: a.Strings("author"), Limit: a.Int("limit"), Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
 	if err != nil {
 		return nil, err
 	}

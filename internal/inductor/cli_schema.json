@@ -8,7 +8,8 @@
         "names": [
           "--author"
         ],
-        "help": "limit to one creator id"
+        "help": "just this creator id (repeatable)",
+        "action": "append"
       },
       {
         "names": [
@@ -297,7 +298,9 @@
       {
         "names": [
           "--author"
-        ]
+        ],
+        "action": "append",
+        "help": "just this creator id (repeatable)"
       },
       {
         "names": [
