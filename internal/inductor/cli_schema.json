@@ -104,6 +104,13 @@
         ],
         "action": "store_true",
         "help": "ingest even though the sources have errors"
+      },
+      {
+        "names": [
+          "--wait-unfinished"
+        ],
+        "action": "store_true",
+        "help": "wait for a resumed batch that is still running, instead of leaving it for later"
       }
     ]
   },
@@ -343,6 +350,62 @@
       },
       {
         "names": [
+          "--no-check"
+        ],
+        "action": "store_true",
+        "help": "skip the preflight source and mapping report; source validation still requires --force to bypass"
+      },
+      {
+        "names": [
+          "--no-tagmaps"
+        ],
+        "action": "store_true",
+        "help": "skip filling missing tag mappings for selected authors"
+      },
+      {
+        "names": [
+          "--no-adjudicate"
+        ],
+        "action": "store_true",
+        "help": "skip generating and applying library-wide tag rulings"
+      },
+      {
+        "names": [
+          "--no-adjudicate-apply"
+        ],
+        "action": "store_true",
+        "help": "save adjudication rulings without applying them"
+      },
+      {
+        "names": [
+          "--no-adjudicate-write"
+        ],
+        "action": "store_true",
+        "help": "preview applying adjudication rulings without changing the registry, mappings or items"
+      },
+      {
+        "names": [
+          "--no-voiceprint-verify"
+        ],
+        "action": "store_true",
+        "help": "skip the final library-wide voice attribution report"
+      },
+      {
+        "names": [
+          "--no-duplicates"
+        ],
+        "action": "store_true",
+        "help": "skip the final library-wide duplicate report (run never merges duplicates)"
+      },
+      {
+        "names": [
+          "--no-orphans"
+        ],
+        "action": "store_true",
+        "help": "skip the final library-wide orphan report (run never deletes orphans)"
+      },
+      {
+        "names": [
           "--only"
         ],
         "type": "pathlib.Path",
@@ -386,6 +449,89 @@
           "--dry-run"
         ],
         "action": "store_true"
+      },
+      {
+        "names": [
+          "--no-progress"
+        ],
+        "action": "store_true",
+        "help": "disable the default once-per-minute progress report; other status and errors remain visible"
+      },
+      {
+        "names": [
+          "--verbose"
+        ],
+        "action": "store_true",
+        "help": "log each work dispatch and completion, including recording artefacts and maintenance operations"
+      },
+      {
+        "names": [
+          "--no-review-proposals"
+        ],
+        "action": "store_true",
+        "help": "omit stored reviewer-approved new tags from adjudication; item and tagmap proposals remain included"
+      },
+      {
+        "names": [
+          "--no-backfill"
+        ],
+        "action": "store_true",
+        "help": "skip applying registered and adjudicated tags requested by stored reviews"
+      },
+      {
+        "names": [
+          "--no-acoustic-apply"
+        ],
+        "action": "store_true",
+        "help": "skip writing cached acoustic measurements and missing durations onto entries"
+      },
+      {
+        "names": [
+          "--no-similar"
+        ],
+        "action": "store_true",
+        "help": "skip updating similar-voice relationships on author pages"
+      },
+      {
+        "names": [
+          "--no-cameos"
+        ],
+        "action": "store_true",
+        "help": "skip the guest-speaker report; voiceprint verification remains independent"
+      },
+      {
+        "names": [
+          "--no-transcribe-audit"
+        ],
+        "action": "store_true",
+        "help": "skip the transcript coverage report (audit reports only; it does not retranscribe)"
+      },
+      {
+        "names": [
+          "--no-artwork-repair"
+        ],
+        "action": "store_true",
+        "help": "skip library-wide cover prompt translation and missing, invalid, or stale generated cover repair"
+      },
+      {
+        "names": [
+          "--no-cover-prompts"
+        ],
+        "action": "store_true",
+        "help": "skip translating missing natural-language cover prompts during artwork repair"
+      },
+      {
+        "names": [
+          "--wait-unfinished"
+        ],
+        "action": "store_true",
+        "help": "wait for a resumed batch that is still running, instead of leaving it for later"
+      },
+      {
+        "names": [
+          "--resume"
+        ],
+        "help": "pick up an interrupted run by its resume point id"
       }
     ]
   },

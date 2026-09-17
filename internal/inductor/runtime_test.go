@@ -148,7 +148,7 @@ func TestGraphRunsCachedWorkAndBlocksFailedDependencies(t *testing.T) {
 	c := testConfig(t)
 	engine := NewEngine(c)
 	audio := filepath.Join(c.Root, "audio.mp3")
-	putFile(t, audio, []byte("audio"))
+	putAudio(t, audio, 1)
 	s := &Source{Path: audio, Audio: audio, Author: "Creator", Title: "Title", Data: Record{}}
 	job := Planned{s, "title", filepath.Join(c.Content, "creator", "title.yaml")}
 	fp, err := engine.fingerprint(job)

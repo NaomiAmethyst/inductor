@@ -264,6 +264,7 @@ func Main(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	engine := NewEngine(c)
+	engine.Colour = colourAvailable(stdout)
 	var outputMu sync.Mutex
 	engine.Say = func(format string, v ...any) {
 		outputMu.Lock()

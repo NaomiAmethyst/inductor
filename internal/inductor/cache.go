@@ -2,11 +2,13 @@
 package inductor
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"golang.org/x/crypto/blake2b"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -59,6 +61,73 @@ func TranscriptKey(text string) string {
 	h, _ := blake2b.New(16, nil)
 	_, _ = h.Write([]byte(normalized))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// SoundnessCache remembers which audio decodes from end to end.
+//
+// A file can open, report a duration, and still be broken: a truncated
+// download or a damaged frame run decodes to silence, transcribes to a dozen
+// characters, and produces an item that looks playable on the site and is not.
+// Sampling the first seconds does not find it -- the damage is usually further
+// in -- so the whole file is decoded, once, and the verdict kept against the
+// same size-and-mtime identity the fingerprints use.
+type SoundnessCache struct {
+	Path    string
+	mu      sync.Mutex
+	entries Record
+	dirty   bool
+}
+
+func NewSoundnessCache(path string) *SoundnessCache {
+	return &SoundnessCache{Path: path, entries: record(readJSON(path)["entries"])}
+}
+
+// Of returns what the decoder complained about, or "" if the file played
+// through clean. The error is for when the check itself could not be run.
+func (c *SoundnessCache) Of(ctx context.Context, path string) (string, error) {
+	s, e := os.Stat(path)
+	if e != nil {
+		return "", e
+	}
+	key, ok := fileIdentity(path, s)
+	if ok {
+		c.mu.Lock()
+		row := array(c.entries[key])
+		if len(row) == 3 && str(row[0]) == fmt.Sprint(s.Size()) && str(row[1]) == fmt.Sprint(s.ModTime().UnixNano()) {
+			v := str(row[2])
+			c.mu.Unlock()
+			return v, nil
+		}
+		c.mu.Unlock()
+	}
+	out, _ := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-i", path, "-f", "null", "-").CombinedOutput()
+	complaint := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(complaint, '\n'); i > 0 {
+		complaint = complaint[:i]
+	}
+	if len(complaint) > 200 {
+		complaint = complaint[:200]
+	}
+	if ok {
+		c.mu.Lock()
+		c.entries[key] = []any{s.Size(), s.ModTime().UnixNano(), complaint}
+		c.dirty = true
+		c.mu.Unlock()
+	}
+	return complaint, nil
+}
+
+func (c *SoundnessCache) Save() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.dirty {
+		return nil
+	}
+	if e := writeJSON(c.Path, Record{"apiVersion": "inductor/v1", "kind": "SoundnessCache", "entries": c.entries}); e != nil {
+		return e
+	}
+	c.dirty = false
+	return nil
 }
 
 type FingerprintCache struct {
@@ -129,6 +198,20 @@ func (s *AnalysisStore) Get(key, audio string) Record {
 		return nil
 	}
 	return readJSON(filepath.Join(s.Root, key+".json"))
+}
+
+// Peek also understands legacy audio-keyed records without migrating them.
+// Planning and dry runs must be able to inspect a cache without writing it.
+func (s *AnalysisStore) Peek(key, audio string) Record {
+	r := readJSON(filepath.Join(s.Root, key+".json"))
+	if r != nil || audio == "" || audio == key {
+		return r
+	}
+	old := readJSON(filepath.Join(s.Root, audio+".json"))
+	if truth(old["analysis"]) {
+		return old
+	}
+	return nil
 }
 func (s *AnalysisStore) Put(key string, payload Record, audio, model string) error {
 	s.mu.Lock()

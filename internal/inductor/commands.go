@@ -18,8 +18,26 @@ func (e *Engine) adoptItem(d Document) Planned {
 	s := &Source{Path: d.Path, Audio: str(first(p["source_key"], audio)), Title: str(d.Data["title"]), Author: str(d.Data["author"]), Data: data, resolved: audio, checked: true, fingerprint: str(p["fingerprint"])}
 	return Planned{s, stemOf(d.Path), d.Path}
 }
-func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (Record, error) {
+func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, commandErr error) {
 	c := e.Config
+	counts := Record{}
+	if a.Command == "run" {
+		var stop func()
+		ctx, stop = startRunProgress(ctx, e.Say, a.Bool("no_progress") || a.Bool("dry_run"), a.Bool("verbose"), e.Colour)
+		defer stop()
+	}
+	if a.Command == "run" && !a.Bool("no_check") {
+		e.Say("check: checking sources and mapping targets")
+		complete := startRunWork(ctx, "check")
+		check, err := e.Dispatch(ctx, Arguments{Command: "check"})
+		complete(err)
+		counts["check"] = check
+		if err != nil && !(a.Bool("force") && len(array(check["errors"])) > 0) {
+			return counts, err
+		}
+	}
+	planned := startRunWork(ctx, "planning recordings")
+	defer func() { planned(commandErr) }()
 	r, err := LoadSources(c.Sources)
 	if err != nil {
 		if a.String("only") == "" {
@@ -40,8 +58,21 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (Record, error)
 			only = []string{}
 		}
 	}
-	redo := a.Bool("redo") || a.Bool("redo_analysis") || a.Bool("overwrite")
-	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{Authors: a.Strings("author"), Limit: a.Int("limit"), Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
+	// run checks individual artifacts even on entries marked finished. This
+	// widens selection without forcing any cached artifact to be regenerated.
+	if id := a.String("resume"); id != "" {
+		only, err = e.LoadResume(id)
+		if err != nil {
+			return nil, err
+		}
+		e.Say("resuming %d recording(s) from %s", len(only), id)
+	}
+	redo := a.Command == "run" || a.Bool("redo") || a.Bool("redo_analysis") || a.Bool("overwrite")
+	planLimit := a.Int("limit")
+	if a.Command == "run" {
+		planLimit = 0
+	}
+	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{Authors: a.Strings("author"), Limit: planLimit, Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
 	if err != nil {
 		return nil, err
 	}
@@ -75,28 +106,30 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (Record, error)
 			return Record{"unmatched": missing}, fmt.Errorf("%d named item(s) could not be reached; --force to run without them", len(missing))
 		}
 	}
-	if len(chosen) == 0 {
+	if a.Command == "run" {
+		pending := []Planned{}
+		for _, j := range chosen {
+			if only != nil || len(a.Strings("redo")) > 0 || a.Bool("overwrite") || e.runJobOutstanding(j, a) {
+				pending = append(pending, j)
+			}
+		}
+		chosen = pending
+		if n := a.Int("limit"); n > 0 {
+			chosen = chosen[:min(n, len(chosen))]
+		}
+	}
+	planned(nil)
+	if len(chosen) == 0 && a.Command != "run" {
 		return Record{"recordings": 0, "message": "nothing outstanding"}, nil
 	}
 	e.Say("%d recording(s) selected", len(chosen))
 	if a.Command == "run" {
-		e.noProvision = a.Bool("no_provision")
-		e.Box = NewGPUBox(c, a.String("remote_dir"))
-		counts, err := e.RunGraph(ctx, chosen, RunOptions{Redo: a.Strings("redo"), Overwrite: a.Bool("overwrite"), Covers: !a.Bool("no_covers"), DryRun: a.Bool("dry_run"), Batch: a.Int("batch")})
-		if !a.Bool("dry_run") && !a.Bool("no_pages") && ctx.Err() == nil {
-			pages, pageErr := e.Authors(ctx, AuthorOptions{Model: c.Enrich.AnalysisModel, Render: !a.Bool("no_covers"), Write: true, Workers: 4})
-			counts["pages"] = pages
-			if err == nil {
-				err = pageErr
-			}
-		}
-		return counts, err
+		return e.runSelected(ctx, a, chosen, counts)
 	}
 	stages := a.Strings("stage")
 	if len(stages) == 0 {
 		stages = []string{"media", "transcribe", "analyse", "review", "emit"}
 	}
-	counts := Record{}
 	failures := 0
 	for _, stage := range []string{"media", "transcribe", "analyse", "review", "emit"} {
 		if !contains(stages, stage) {
@@ -107,7 +140,7 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (Record, error)
 			if err != nil {
 				return counts, err
 			}
-			done, err := e.RunReviews(ctx, jobs, max(1, a.Int("in_flight")), max(1, c.Enrich.BatchSize), time.Duration(max(1, a.Int("poll")))*time.Second, a.Strings("recover"))
+			done, err := e.RunReviews(ctx, jobs, max(1, a.Int("in_flight")), max(1, c.Enrich.BatchSize), time.Duration(max(1, a.Int("poll")))*time.Second, a.Strings("recover"), a.Bool("wait_unfinished"))
 			counts[stage] = done
 			if err != nil {
 				failures++
@@ -279,7 +312,9 @@ func (e *Engine) transcribeCommand(ctx context.Context, a Arguments) (Record, er
 			if p == nil {
 				continue
 			}
+			complete := startRunWork(ctx, "audit transcript "+j.Source.AuthorID()+"/"+j.Stem)
 			meta := AudioMetadata(ctx, j.Source.AudioPath(e.Config.Sources))
+			complete(ctx.Err())
 			length := number(meta["duration"])
 			covered := number(p["covered"])
 			if p["covered"] == nil {

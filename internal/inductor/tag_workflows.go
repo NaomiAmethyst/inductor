@@ -4,6 +4,7 @@ package inductor
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"gopkg.in/yaml.v3"
 	"io"
@@ -136,10 +137,20 @@ func WorthRevisiting(path string, counts map[string]int, known []string) ([]Reco
 	return out, nil
 }
 
-type TagRequest struct{ Spellings, Recordings map[string]bool }
+type TagRequest struct {
+	Spellings, Recordings map[string]bool
+	Reasons               []string
+}
 
 func AskedFor(root string) (map[string]*TagRequest, error) {
+	return askedFor(root, false)
+}
+
+func askedFor(root string, reviewedOnly bool) (map[string]*TagRequest, error) {
 	if !isDir(root) {
+		if reviewedOnly && !exists(root) {
+			return map[string]*TagRequest{}, nil
+		}
 		return nil, fmt.Errorf("expected stored enrichments at %s", root)
 	}
 	files, e := filepath.Glob(filepath.Join(root, "*.json"))
@@ -157,15 +168,17 @@ func AskedFor(root string) (map[string]*TagRequest, error) {
 			continue
 		}
 		wanted := []string{}
+		reasons := map[string]string{}
 		final := record(doc["final"])
 		if len(final) > 0 {
 			for _, v := range array(final["new_tags"]) {
 				r := record(v)
 				if truth(r["tag"]) && contains([]string{"keep", "accept", "approve", "new"}, wordFold(str(r["verdict"]))) {
 					wanted = append(wanted, str(r["tag"]))
+					reasons[str(r["tag"])] = str(r["why"])
 				}
 			}
-		} else {
+		} else if !reviewedOnly {
 			for _, v := range array(record(record(doc["analysis"])["tags"])["proposed"]) {
 				name, ok := v.(string)
 				if !ok {
@@ -180,9 +193,12 @@ func AskedFor(root string) (map[string]*TagRequest, error) {
 		for _, name := range wanted {
 			key := wordFold(name)
 			if out[key] == nil {
-				out[key] = &TagRequest{map[string]bool{}, map[string]bool{}}
+				out[key] = &TagRequest{Spellings: map[string]bool{}, Recordings: map[string]bool{}}
 			}
 			out[key].Spellings[name] = true
+			if why := reasons[name]; why != "" && !contains(out[key].Reasons, why) && len(out[key].Reasons) < 4 {
+				out[key].Reasons = append(out[key].Reasons, why)
+			}
 			for _, fp := range prints {
 				out[key].Recordings[fp] = true
 			}
@@ -191,13 +207,44 @@ func AskedFor(root string) (map[string]*TagRequest, error) {
 	return out, nil
 }
 func Backfill(c Config, tags []string, write bool) (Record, error) {
+	return backfill(c, tags, write, false)
+}
+
+func backfill(c Config, tags []string, write, reviewedOnly bool) (Record, error) {
 	reg, e := LoadRegistry(c.RegistryPath())
 	if e != nil {
 		return nil, e
 	}
-	wanted, e := AskedFor(c.Analysis())
+	wanted, e := askedFor(c.Analysis(), reviewedOnly)
 	if e != nil {
 		return nil, e
+	}
+	standing, e := Standing(filepath.Join(c.Decisions, "rulings.yaml"))
+	if e != nil {
+		return nil, e
+	}
+	// Decisions enter the ledger before application. A report-only run must
+	// not accidentally apply a pending rename/merge through backfill instead.
+	unapplied := map[string]bool{}
+	if reviewedOnly {
+		path := filepath.Join(c.Cache, "rulings.yaml")
+		if exists(path) {
+			saved, err := readYAML(path)
+			if err != nil {
+				return nil, err
+			}
+			if !truth(saved["applied"]) {
+				for _, row := range array(saved["rulings"]) {
+					unapplied[wordFold(str(record(row)["tag"]))] = true
+				}
+			}
+		}
+	}
+	decided := map[string]string{}
+	for tag, row := range standing {
+		if !unapplied[wordFold(tag)] && contains([]string{"approve", "rework", "merge"}, str(row["verdict"])) {
+			decided[wordFold(tag)] = str(first(row["into"], tag))
+		}
 	}
 	docs, e := Documents(c.Content, "item")
 	if e != nil {
@@ -212,18 +259,30 @@ func Backfill(c Config, tags []string, write bool) (Record, error) {
 		fp := str(record(d.Data["provenance"])["fingerprint"])
 		changed := false
 		have := texts(d.Data["tags"])
-		for _, name := range sortedKeys(reg.Meanings) {
-			folded := wordFold(name)
-			if len(tags) > 0 && !selected[folded] {
-				continue
-			}
+		mapping := LoadMapping(c, str(d.Data["author"]))
+		for _, folded := range sortedKeys(wanted) {
 			request := wanted[folded]
-			if request == nil || !request.Recordings[fp] {
+			if !request.Recordings[fp] {
 				continue
 			}
+			name := ""
+			for _, raw := range sortedKeys(request.Spellings) {
+				var why string
+				name, why = reg.Resolve(raw, mapping)
+				if name == "" && why != "dropped" {
+					name = reg.Spelling[Fold(decided[folded])]
+				}
+				if name != "" {
+					break
+				}
+			}
+			if name == "" || (len(tags) > 0 && !selected[wordFold(name)]) {
+				continue
+			}
+			canonical := wordFold(name)
 			already := false
 			for _, t := range have {
-				already = already || wordFold(t) == folded
+				already = already || wordFold(t) == canonical
 			}
 			if already {
 				continue
@@ -242,6 +301,14 @@ func Backfill(c Config, tags []string, write bool) (Record, error) {
 		}
 		if changed {
 			d.Data["tags"] = have
+			if contains(texts(d.Data["needs"]), "tags") {
+				needs := without(texts(d.Data["needs"]), "tags")
+				if len(needs) == 0 {
+					delete(d.Data, "needs")
+				} else {
+					d.Data["needs"] = needs
+				}
+			}
 			report["items"] = integer(report["items"]) + 1
 			if write {
 				if _, e = SaveDocument(d.Path, d.Data); e != nil {
@@ -391,12 +458,18 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 		authors = sortedKeys(counts)
 	}
 	total := Record{"asked": 0, "ruled": 0, "pending": 0}
+	var failures []error
 	for _, a := range authors {
 		known := LoadMapping(c, a)
 		waiting := map[string]Record{}
+		for _, v := range array(optionalYAML(MappingPath(c, a))["pending"]) {
+			row := record(v)
+			waiting[str(first(row["from"], row["tag"]))] = row
+		}
+		total["pending"] = integer(total["pending"]) + len(waiting)
 		todo := []string{}
 		for t := range counts[a] {
-			if known[t] == nil {
+			if known[t] == nil && waiting[t] == nil {
 				if _, settled := reg.Meanings[t]; !settled {
 					todo = append(todo, t)
 				}
@@ -430,9 +503,12 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 				}
 			}
 			user := "THE REGISTRY — each tag with what it means.\n" + reg.Block() + fmt.Sprintf("\n\n\nTAGS USED BY '%s', with how many of their recordings carry each. Rule on every one.\n", a) + strings.Join(lines, "\n") + "\n" + context + "\n" + prompt("tagmap_shape")
+			complete := startRunWork(ctx, fmt.Sprintf("tagmap %s tags %d-%d/%d", a, start+1, start+len(part), len(todo)))
 			reply, err := e.API.ChatJSON(ctx, model, messages(prompt("tagmap_system"), user), TokenCeiling, .2)
+			complete(err)
 			if err != nil {
 				e.Say("tagmap %s: %v", a, err)
+				failures = append(failures, fmt.Errorf("tagmap %s: %w", a, err))
 				missing = append(missing, part...)
 				continue
 			}
@@ -456,7 +532,7 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 				target := strings.TrimSpace(str(r["to"]))
 				if target != "" && strings.ToLower(str(r["verdict"])) != "drop" &&
 					reg.Spelling[Fold(target)] == "" {
-					waiting[target] = Record{"tag": target, "from": t, "author": a,
+					waiting[t] = Record{"tag": target, "from": t, "author": a,
 						"count": counts[a][t], "description": str(r["description"]),
 						"why": str(r["why"])}
 					total["pending"] = integer(total["pending"]) + 1
@@ -467,6 +543,7 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 			for _, t := range part {
 				if !fresh[t] {
 					missing = append(missing, t)
+					failures = append(failures, fmt.Errorf("tagmap %s: no ruling for %q", a, t))
 				}
 			}
 		}
@@ -495,7 +572,7 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 			}
 		}
 	}
-	return total, nil
+	return total, errors.Join(failures...)
 }
 func AdoptTagmaps(c Config, authors []string, write bool) ([]Record, error) {
 	reg, e := LoadRegistry(c.RegistryPath())
@@ -555,6 +632,10 @@ func (e *Engine) Adjudicate(ctx context.Context, fromReviews, collect bool, mode
 	if err != nil {
 		return nil, err
 	}
+	return e.adjudicatePending(ctx, rows, collect, model, path)
+}
+
+func (e *Engine) adjudicatePending(ctx context.Context, rows map[string]Record, collect bool, model, path string) (Record, error) {
 	reg, err := LoadRegistry(e.Config.RegistryPath())
 	if err != nil {
 		return nil, err
@@ -596,7 +677,9 @@ func (e *Engine) Adjudicate(ctx context.Context, fromReviews, collect bool, mode
 		}
 	}
 	user := "THE REGISTRY AS IT STANDS — a tag already here is a reason to reject:\n" + reg.Block() + "\n\n\nTAGS PROPOSED DURING THIS RUN. Rule on every one.\n" + strings.Join(lines, "\n") + "\n\n" + prompt("adjudicate_shape")
+	complete := startRunWork(ctx, fmt.Sprintf("adjudication request (%d tags)", len(names)))
 	reply, err := e.API.ChatJSON(ctx, model, messages(prompt("adjudicate_system"), user), TokenCeiling, .2)
+	complete(err)
 	if err != nil {
 		return nil, err
 	}

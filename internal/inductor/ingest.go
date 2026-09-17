@@ -149,11 +149,13 @@ type Engine struct {
 	Config       Config
 	API          *APIClient
 	Fingerprints *FingerprintCache
+	Soundness    *SoundnessCache
 	Index        *ItemIndex
 	Store        *AnalysisStore
 	Acoustic     AcousticStore
 	Box          *GPUBox
 	Say          func(string, ...any)
+	Colour       bool
 	boxOnce      sync.Once
 	boxErr       error
 	noProvision  bool
@@ -161,14 +163,38 @@ type Engine struct {
 }
 
 func NewEngine(c Config) *Engine {
-	return &Engine{Config: c, API: NewAPIClient(c), Fingerprints: NewFingerprintCache(filepath.Join(c.Cache, "fingerprints.json")), Index: NewItemIndex(filepath.Join(c.Cache, "item-index.json")), Store: &AnalysisStore{Root: c.Analysis()}, Acoustic: AcousticStore{filepath.Join(c.Cache, "acoustic")}, Say: func(string, ...any) {}}
+	return &Engine{Config: c, API: NewAPIClient(c), Fingerprints: NewFingerprintCache(filepath.Join(c.Cache, "fingerprints.json")), Soundness: NewSoundnessCache(filepath.Join(c.Cache, "soundness.json")), Index: NewItemIndex(filepath.Join(c.Cache, "item-index.json")), Store: &AnalysisStore{Root: c.Analysis()}, Acoustic: AcousticStore{filepath.Join(c.Cache, "acoustic")}, Say: func(string, ...any) {}}
 }
 func (e *Engine) Close() error {
 	if err := e.Fingerprints.Save(); err != nil {
 		return err
 	}
+	if err := e.Soundness.Save(); err != nil {
+		return err
+	}
 	return e.Index.Save()
 }
+
+// soundEnough refuses audio that does not decode from end to end.
+//
+// Half a file is worse than none: a damaged recording still transcribes, still
+// gets analysed, and still becomes an item -- one that reads as complete and
+// plays as silence. Better to fail the job and say why.
+func (e *Engine) soundEnough(ctx context.Context, j Planned) error {
+	p := j.Source.AudioPath(e.Config.Sources)
+	if p == "" {
+		return fmt.Errorf("audio not found: %s", j.Source.Audio)
+	}
+	complaint, err := e.Soundness.Of(ctx, p)
+	if err != nil {
+		return err
+	}
+	if complaint != "" {
+		return fmt.Errorf("audio does not decode cleanly, refusing to process half a file: %s", complaint)
+	}
+	return nil
+}
+
 func (e *Engine) fingerprint(j Planned) (string, error) {
 	if j.Source.fingerprint != "" {
 		return j.Source.fingerprint, nil
@@ -321,13 +347,58 @@ func (e *Engine) ReviewJobs(jobs []Planned, redo bool) ([]ReviewJob, error) {
 	}
 	return out, nil
 }
-func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, batchSize int, poll time.Duration, recover []string) (int, error) {
+func (e *Engine) batchJournal(id string) string {
+	return filepath.Join(e.Config.Cache, "batches", id+".json")
+}
+
+// markBatch records what became of a submitted batch. Until this existed the
+// journal said "submitted" forever, so a batch that landed hours ago was
+// indistinguishable from one nobody ever read -- which is the whole question a
+// resume has to answer.
+func (e *Engine) markBatch(id, status string) {
+	j := readJSON(e.batchJournal(id))
+	if len(j) == 0 {
+		return
+	}
+	j["status"] = status
+	_ = writeJSON(e.batchJournal(id), j)
+}
+
+// UnreadBatches finds batches that were submitted and whose results were never
+// taken up, limited to those covering work in hand. A killed process does not
+// cancel a batch and there is no cancel endpoint, so the reviews are paid for
+// either way: submitting them again buys the same answers twice.
+func (e *Engine) UnreadBatches(wanted map[string]ReviewJob) []Record {
+	paths, _ := filepath.Glob(filepath.Join(e.Config.Cache, "batches", "*.json"))
+	sort.Strings(paths)
+	out := []Record{}
+	for _, p := range paths {
+		j := readJSON(p)
+		if str(j["status"]) != "submitted" {
+			continue
+		}
+		for _, v := range array(j["jobs"]) {
+			b, _ := jsonBytes(v)
+			var rj ReviewJob
+			if decodeJSON(b, &rj) == nil && rj.ID != "" {
+				if _, ok := wanted[rj.ID]; ok {
+					out = append(out, j)
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
+func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, batchSize int, poll time.Duration, recover []string, wait bool) (int, error) {
 	model := e.Config.Enrich.ReviewModel
 	byID := map[string]ReviewJob{}
 	for _, j := range jobs {
 		byID[j.ID] = j
 	}
 	done := 0
+	landed := map[string]bool{}
 	land := func(results map[string]string) error {
 		for _, id := range sortedKeys(results) {
 			j, ok := byID[id]
@@ -342,6 +413,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 			if err = e.Store.Put(j.Key, Record{"final": final, "review_model": model, "sentences": j.Sentences}, j.Fingerprint, ""); err != nil {
 				return err
 			}
+			landed[id] = true
 			done++
 		}
 		return nil
@@ -363,6 +435,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 		if err = land(results); err != nil {
 			return done, err
 		}
+		e.markBatch(id, "landed")
 	}
 	if len(recover) > 0 {
 		return done, nil
@@ -370,9 +443,72 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 	if len(jobs) == 0 {
 		return 0, nil
 	}
+	// Anything the journal still calls submitted that covers work in hand was
+	// paid for and never read. Take it up before buying the same answers twice.
+	for _, pending := range e.UnreadBatches(byID) {
+		id := str(pending["id"])
+		// Collected, not waited on. Naming a batch with --recover is a request
+		// to wait for it; finding one in the journal is not, and BatchWait sits
+		// for up to a day. A run that stumbles on somebody's unfinished batch
+		// should take what is ready and get on with the rest.
+		info, err := e.API.BatchStatus(ctx, id)
+		if err != nil {
+			e.Say("batch %s could not be read: %v", id, err)
+			e.markBatch(id, "unreadable")
+			continue
+		}
+		switch str(info["status"]) {
+		case "completed", "ended", "finalized":
+			results, err := e.API.BatchResults(ctx, id, info)
+			if err != nil {
+				e.Say("batch %s could not be collected: %v", id, err)
+				e.markBatch(id, "unreadable")
+				continue
+			}
+			e.Say("taking up batch %s, submitted earlier and never read", id)
+			if err = land(results); err != nil {
+				return done, err
+			}
+			e.markBatch(id, "landed")
+		case "failed", "cancelled", "expired":
+			e.Say("batch %s ended as %s; nothing to take up", id, str(info["status"]))
+			e.markBatch(id, "unreadable")
+		default:
+			if !wait {
+				e.Say("batch %s is still running; leaving it in the journal", id)
+				continue
+			}
+			e.Say("batch %s is still running; waiting for it", id)
+			results, err := e.API.BatchWait(ctx, id, poll)
+			if err != nil {
+				e.Say("batch %s could not be taken up: %v", id, err)
+				e.markBatch(id, "unreadable")
+				continue
+			}
+			if err = land(results); err != nil {
+				return done, err
+			}
+			e.markBatch(id, "landed")
+		}
+	}
+	if len(landed) > 0 {
+		kept := make([]ReviewJob, 0, len(jobs))
+		for _, j := range jobs {
+			if !landed[j.ID] {
+				kept = append(kept, j)
+			}
+		}
+		e.Say("%d review(s) recovered from an earlier batch, %d still to submit", len(jobs)-len(kept), len(kept))
+		jobs = kept
+		if len(jobs) == 0 {
+			return done, nil
+		}
+	}
 	if !strings.HasSuffix(model, ":batch") {
 		results, errs := parallelMap(ctx, jobs, max(1, e.Config.Enrich.Workers), func(ctx context.Context, j ReviewJob) (string, error) {
+			complete := startRunWork(ctx, "review request "+j.ID)
 			text, _, err := e.API.Chat(ctx, model, j.Messages, TokenCeiling, .2)
+			complete(err)
 			return text, err
 		})
 		for i, result := range results {
@@ -395,10 +531,19 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 		chunks = append(chunks, jobs[i:min(i+batchSize, len(jobs))])
 	}
 	type batchResult struct {
+		id      string
 		results map[string]string
 		err     error
 	}
-	results, errs := parallelMap(ctx, chunks, max(1, inFlight), func(ctx context.Context, chunk []ReviewJob) (batchResult, error) {
+	results, errs := parallelMap(ctx, chunks, max(1, inFlight), func(ctx context.Context, chunk []ReviewJob) (result batchResult, workErr error) {
+		complete := startRunWork(ctx, fmt.Sprintf("review batch (%d recordings, first=%s)", len(chunk), chunk[0].ID))
+		defer func() {
+			if workErr != nil {
+				complete(workErr)
+			} else {
+				complete(result.err)
+			}
+		}()
 		id, err := e.API.BatchSubmit(ctx, model, chunk)
 		if err != nil {
 			if strings.Contains(err.Error(), "does not have a :batch endpoint") {
@@ -420,7 +565,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 			return batchResult{}, fmt.Errorf("batch %s submitted but journal failed: %w; recover with --recover %s", id, err, id)
 		}
 		r, err := e.API.BatchWait(ctx, id, poll)
-		return batchResult{r, err}, nil
+		return batchResult{id, r, err}, nil
 	})
 	var failures []string
 	for i, result := range results {
@@ -434,6 +579,9 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 		}
 		if err = land(result.results); err != nil {
 			return done, err
+		}
+		if result.id != "" {
+			e.markBatch(result.id, "landed")
 		}
 	}
 	if len(failures) > 0 {

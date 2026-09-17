@@ -155,7 +155,7 @@ func TestReviewRecoveryUsesJournalWithoutResubmission(t *testing.T) {
 	if err := writeJSON(filepath.Join(c.Cache, "batches", "old.json"), Record{"jobs": []ReviewJob{job}}); err != nil {
 		t.Fatal(err)
 	}
-	done, err := engine.RunReviews(context.Background(), nil, 1, 1, time.Millisecond, []string{"old"})
+	done, err := engine.RunReviews(context.Background(), nil, 1, 1, time.Millisecond, []string{"old"}, false)
 	if err != nil || done != 1 || submits.Load() != 0 {
 		t.Fatal(done, err)
 	}
@@ -169,7 +169,7 @@ func TestReviewFailureIsReported(t *testing.T) {
 	c.Enrich.ReviewModel = "model"
 	engine := NewEngine(c)
 	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) { http.Error(w, "forbidden", 403) })
-	done, err := engine.RunReviews(context.Background(), []ReviewJob{{ID: "one", Key: "key"}}, 1, 1, time.Millisecond, nil)
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{{ID: "one", Key: "key"}}, 1, 1, time.Millisecond, nil, false)
 	if err == nil || done != 0 {
 		t.Fatal(done, err)
 	}
@@ -190,5 +190,142 @@ func TestCostEstimateUsesModelRates(t *testing.T) {
 	}
 	if number(record(c.Usage()["model"])["cost"]) != .02 {
 		t.Fatal(c.Usage())
+	}
+}
+
+func TestRunTakesUpASubmittedBatchNobodyRead(t *testing.T) {
+	c := testConfig(t)
+	c.Enrich.ReviewModel = "model:batch"
+	engine := NewEngine(c)
+	var submits atomic.Int32
+	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			submits.Add(1)
+			t.Error("a batch already paid for was submitted again")
+		}
+		replyJSON(t, w, Record{"status": "completed", "results": []any{
+			Record{"custom_id": "one", "body": chatReply(`{"summary":"already paid for"}`)}}})
+	})
+	job := ReviewJob{ID: "one", Key: "text-key", Fingerprint: "audio-key",
+		Sentences: []Sentence{{ID: "s1", Start: 0, End: 1, Text: "Evidence."}}}
+	// What a killed run leaves behind: the id, the work, and no results taken up.
+	if err := writeJSON(filepath.Join(c.Cache, "batches", "stranded.json"),
+		Record{"id": "stranded", "model": "model:batch", "jobs": []ReviewJob{job}, "status": "submitted"}); err != nil {
+		t.Fatal(err)
+	}
+	// The same work comes round again, with nobody naming a batch to recover.
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{job}, 1, 1, time.Millisecond, nil, false)
+	if err != nil || done != 1 || submits.Load() != 0 {
+		t.Fatal(done, err, submits.Load())
+	}
+	if got := engine.Store.Get("text-key", ""); str(record(got["final"])["summary"]) != "already paid for" {
+		t.Fatal("the stranded results were not taken up", got)
+	}
+	// And the journal now says so, or the next run would wait on it all over.
+	if s := str(readJSON(filepath.Join(c.Cache, "batches", "stranded.json"))["status"]); s != "landed" {
+		t.Fatalf("journal still reads %q", s)
+	}
+}
+
+func TestAnUnreadableBatchDoesNotStopTheRun(t *testing.T) {
+	c := testConfig(t)
+	c.Enrich.ReviewModel = "model:batch"
+	engine := NewEngine(c)
+	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			replyJSON(t, w, Record{"id": "fresh"})
+			return
+		}
+		if strings.Contains(r.URL.Path, "gone") {
+			http.Error(w, "no such batch", 404)
+			return
+		}
+		replyJSON(t, w, Record{"status": "completed", "results": []any{
+			Record{"custom_id": "one", "body": chatReply(`{"summary":"drawn fresh"}`)}}})
+	})
+	job := ReviewJob{ID: "one", Key: "text-key", Fingerprint: "audio-key"}
+	if err := writeJSON(filepath.Join(c.Cache, "batches", "gone.json"),
+		Record{"id": "gone", "model": "model:batch", "jobs": []ReviewJob{job}, "status": "submitted"}); err != nil {
+		t.Fatal(err)
+	}
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{job}, 1, 1, time.Millisecond, nil, false)
+	if err != nil || done != 1 {
+		t.Fatal("a stale journal stopped the run", done, err)
+	}
+	if s := str(readJSON(filepath.Join(c.Cache, "batches", "gone.json"))["status"]); s != "unreadable" {
+		t.Fatalf("the dead journal still reads %q and will be retried forever", s)
+	}
+}
+
+func TestAnUnfinishedBatchIsLeftForLaterNotWaitedOn(t *testing.T) {
+	c := testConfig(t)
+	c.Enrich.ReviewModel = "model:batch"
+	engine := NewEngine(c)
+	var polls atomic.Int32
+	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			replyJSON(t, w, Record{"id": "fresh"})
+			return
+		}
+		if strings.Contains(r.URL.Path, "slow") {
+			polls.Add(1)
+			replyJSON(t, w, Record{"status": "in_progress"})
+			return
+		}
+		replyJSON(t, w, Record{"status": "completed", "results": []any{
+			Record{"custom_id": "one", "body": chatReply(`{"summary":"fresh"}`)}}})
+	})
+	job := ReviewJob{ID: "one", Key: "text-key", Fingerprint: "audio-key"}
+	if err := writeJSON(filepath.Join(c.Cache, "batches", "slow.json"),
+		Record{"id": "slow", "model": "model:batch", "jobs": []ReviewJob{job}, "status": "submitted"}); err != nil {
+		t.Fatal(err)
+	}
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{job}, 1, 1, time.Millisecond, nil, false)
+	if err != nil || done != 1 {
+		t.Fatal("an unfinished batch derailed the run", done, err)
+	}
+	// Asked once and moved on, rather than sitting on it for up to a day.
+	if n := polls.Load(); n != 1 {
+		t.Fatalf("polled an unfinished batch %d times; adoption should ask once", n)
+	}
+	// Still submitted, so a later run or an explicit --recover can claim it.
+	if s := str(readJSON(filepath.Join(c.Cache, "batches", "slow.json"))["status"]); s != "submitted" {
+		t.Fatalf("journal reads %q; an unfinished batch must stay claimable", s)
+	}
+}
+
+func TestWaitUnfinishedSitsOnABatchUntilItLands(t *testing.T) {
+	c := testConfig(t)
+	c.Enrich.ReviewModel = "model:batch"
+	engine := NewEngine(c)
+	var polls atomic.Int32
+	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			t.Error("waiting on a paid batch should never submit it again")
+			replyJSON(t, w, Record{"id": "fresh"})
+			return
+		}
+		// Running the first time it is asked, finished the second.
+		if polls.Add(1) == 1 {
+			replyJSON(t, w, Record{"status": "in_progress"})
+			return
+		}
+		replyJSON(t, w, Record{"status": "completed", "results": []any{
+			Record{"custom_id": "one", "body": chatReply(`{"summary":"waited for"}`)}}})
+	})
+	job := ReviewJob{ID: "one", Key: "text-key", Fingerprint: "audio-key"}
+	if err := writeJSON(filepath.Join(c.Cache, "batches", "slow.json"),
+		Record{"id": "slow", "model": "model:batch", "jobs": []ReviewJob{job}, "status": "submitted"}); err != nil {
+		t.Fatal(err)
+	}
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{job}, 1, 1, time.Millisecond, nil, true)
+	if err != nil || done != 1 {
+		t.Fatal(done, err)
+	}
+	if got := engine.Store.Get("text-key", ""); str(record(got["final"])["summary"]) != "waited for" {
+		t.Fatal("the batch was not waited for", got)
+	}
+	if s := str(readJSON(filepath.Join(c.Cache, "batches", "slow.json"))["status"]); s != "landed" {
+		t.Fatalf("journal reads %q", s)
 	}
 }

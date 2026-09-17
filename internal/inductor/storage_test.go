@@ -6,12 +6,34 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+// putAudio writes a real, short, decodable file. Fixtures used to be a handful
+// of bytes named .mp3, which was fine until the pipeline started refusing audio
+// that does not decode -- a check whose whole purpose is to reject exactly that.
+func putAudio(t *testing.T, p string, seconds float64) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A tone per path, so two fixtures are never the same recording: some tests
+	// lean on distinct fingerprints and a shared 440Hz would collapse them.
+	tone := 200
+	for _, r := range p {
+		tone = (tone*31 + int(r)) % 4000
+	}
+	out, err := exec.Command("ffmpeg", "-v", "error", "-y", "-f", "lavfi",
+		"-i", fmt.Sprintf("sine=frequency=%d:duration=%g", 200+tone, seconds), p).CombinedOutput()
+	if err != nil {
+		t.Skipf("no ffmpeg for audio fixtures: %v %s", err, out)
+	}
+}
 
 func putFile(t *testing.T, p string, b []byte) {
 	t.Helper()
@@ -459,5 +481,94 @@ func TestArtRemembersTheWordsThatDrewIt(t *testing.T) {
 	// those stale would order the whole library redrawn over a missing field.
 	if ArtStale(Record{}, "anything", "", "turbo") {
 		t.Fatal("an unstamped picture must not read as stale")
+	}
+}
+
+func TestBrokenAudioIsRefusedBeforeAnythingProcessesIt(t *testing.T) {
+	c := testConfig(t)
+	e := NewEngine(c)
+	defer e.Close()
+	sound := filepath.Join(c.Root, "sound.mp3")
+	putAudio(t, sound, 1)
+	broken := filepath.Join(c.Root, "broken.mp3")
+	putFile(t, broken, bytes.Repeat([]byte("not audio at all"), 64))
+
+	if complaint, err := e.Soundness.Of(context.Background(), sound); err != nil || complaint != "" {
+		t.Fatal("clean audio was called broken", complaint, err)
+	}
+	complaint, err := e.Soundness.Of(context.Background(), broken)
+	if err != nil || complaint == "" {
+		t.Fatal("a file that does not decode was called sound", complaint, err)
+	}
+	// The verdict is kept, or every run pays to decode the library again.
+	if err := e.Soundness.Save(); err != nil {
+		t.Fatal(err)
+	}
+	again := NewSoundnessCache(filepath.Join(c.Cache, "soundness.json"))
+	if got, _ := again.Of(context.Background(), broken); got != complaint {
+		t.Fatalf("the verdict did not survive a reload: %q vs %q", got, complaint)
+	}
+
+	// And the graph refuses it rather than producing half an item.
+	s := &Source{Path: broken, Audio: broken, Author: "Creator", Title: "Broken", Data: Record{}}
+	job := Planned{s, "broken", filepath.Join(c.Content, "creator", "broken.yaml")}
+	if err := e.soundEnough(context.Background(), job); err == nil {
+		t.Fatal("the pipeline accepted audio that does not decode")
+	} else if !strings.Contains(err.Error(), "half a file") {
+		t.Fatalf("the refusal does not say why: %v", err)
+	}
+}
+
+func TestAnInterruptedRunLeavesAResumePoint(t *testing.T) {
+	c := testConfig(t)
+	e := NewEngine(c)
+	defer e.Close()
+	jobs := []Planned{}
+	for _, who := range []string{"one", "two", "three"} {
+		src := &Source{Path: filepath.Join(c.Sources, who+".yaml"), Audio: filepath.Join(c.Root, who+".mp3"),
+			Author: "Creator", Title: who, Data: Record{}}
+		jobs = append(jobs, Planned{src, who, filepath.Join(c.Content, "creator", who+".yaml")})
+	}
+	// The first finished every required artefact; the others did not.
+	states := []map[string]int{{}, {}, {}}
+	for _, a := range Graph {
+		states[0][a.Name] = 2
+		states[1][a.Name] = 2
+	}
+	for _, a := range Graph {
+		if a.Required {
+			states[1][a.Name] = 1 // still running when the interrupt arrived
+			break
+		}
+	}
+	id, err := e.saveResume(jobs, states)
+	if err != nil || id == "" {
+		t.Fatal("no resume point written", id, err)
+	}
+	left, err := e.LoadResume(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The one that finished is not asked for again; the other two are.
+	if len(left) != 2 || contains(left, ItemID("creator", "one")) {
+		t.Fatalf("resume point should hold only unfinished work, got %v", left)
+	}
+	for _, want := range []string{ItemID("creator", "two"), ItemID("creator", "three")} {
+		if !contains(left, want) {
+			t.Fatalf("resume point lost %s: %v", want, left)
+		}
+	}
+	if _, err := e.LoadResume("run-0-deadbeef"); err == nil {
+		t.Fatal("an unknown resume point should say so rather than run everything")
+	}
+	// Nothing outstanding means nothing to resume, and no stray file.
+	done := []map[string]int{{}, {}, {}}
+	for i := range done {
+		for _, a := range Graph {
+			done[i][a.Name] = 2
+		}
+	}
+	if id, err := e.saveResume(jobs, done); err != nil || id != "" {
+		t.Fatal("a finished run should leave no resume point", id, err)
 	}
 }

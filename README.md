@@ -92,9 +92,77 @@ bin/inductor -r /path/to/library run --no-covers --no-pages
 
 This processes missing artifacts and writes entries. `ingest` also supports
 individual stages: `media`, `transcribe`, `analyse`, `review`, and `emit`. Use
-`--redo` to include finished items; `--overwrite` permits replacing existing
+`ingest --redo` to include finished items; `run` checks missing artifacts even on
+finished entries, and `run --redo ARTIFACT` forces the named artifact to be rebuilt.
+`--overwrite` permits replacing existing
 summaries and spoilers. Creator descriptions, existing IDs, and extension fields
 are preserved.
+
+`run` also checks sources and mapping targets, fills missing author tag mappings
+before processing, then generates and applies adjudication rulings with writes
+enabled before generating author pages. Adjudication includes stored
+reviewer-approved proposals, and backfill applies approved, renamed, or merged
+tags to recordings whose reviews requested them. Rejected and unreviewed
+proposals are not backfilled by `run`.
+
+After processing, `run` audits transcript coverage, writes acoustic measurements
+and missing durations onto entries, repairs cover prompts and missing, invalid,
+or stale generated covers, and updates similar-voice relationships on author
+pages. It reports voiceprint verification, guest-speaker appearances (cameos),
+duplicates, and orphans. Transcript auditing reports recordings longer than two
+minutes with less than 90% coverage; it does not automatically retranscribe them.
+Manual covers are preserved. Duplicates and orphans are reported
+without merging or deleting anything. These steps still run when no recordings
+need processing.
+
+Each additional step can be omitted:
+
+| Flag | Effect |
+| --- | --- |
+| `--no-check` | Skip the preflight report; bypassing source validation still requires `--force`. |
+| `--no-tagmaps` | Skip filling missing mappings and reconciling their item tags. |
+| `--no-adjudicate` | Skip generating and applying rulings. |
+| `--no-adjudicate-apply` | Generate and save rulings, but do not apply them. |
+| `--no-adjudicate-write` | Generate and save rulings, and preview application without writing registry, mapping, or item changes. |
+| `--no-review-proposals` | Omit stored review proposals from adjudication; item and tagmap proposals remain included. |
+| `--no-backfill` | Skip applying registered/adjudicated tags requested by reviews. |
+| `--no-acoustic-apply` | Skip writing acoustic metadata and missing durations. |
+| `--no-transcribe-audit` | Skip the transcript coverage report. |
+| `--no-artwork-repair` | Skip library-wide cover prompt translation and cover repairs. |
+| `--no-cover-prompts` | Skip prompt translation while retaining cover repair from existing prompts. |
+| `--no-similar` | Skip writing similar-voice relationships on author pages. |
+| `--no-cameos` | Skip guest-speaker detection independently of voiceprint verification. |
+| `--no-voiceprint-verify` | Skip the final attribution report; voiceprint generation remains part of the recording graph. |
+| `--no-duplicates` | Skip the duplicate report. |
+| `--no-orphans` | Skip the orphan report. |
+
+Unapplied rulings are retained in the cache's `rulings.yaml` for a later run.
+`--dry-run` reports existing checks, missing mappings, artifact work, and pending
+adjudication without API calls or applying changes. It previews backfill, acoustic
+application, similar voices, and artwork repairs too. The adjudication apply/write
+opt-outs also prevent backfill writes. Existing `--no-pages` controls author page
+generation; `--no-covers` also skips cover prompt translation and artwork repairs.
+The configured `enrich.covers: false` disables these artwork repairs as well.
+
+Tagmaps honor `--author`; with `--only` or `--limit`, they cover the selected
+recordings' authors. Unrestricted runs also fill mappings for finished authors.
+Adjudication, backfill, acoustic application, transcript auditing, artwork repair,
+similar voices, and the final reports cover the whole library. The recording
+graph honors selection flags, and `--limit` applies after checking for outstanding
+artifacts so complete entries do not prevent later missing work from being found.
+
+During a run, a progress line prints every minute with elapsed time, active work,
+and artifact counts (cached, completed, running, pending, failed, blocked, and
+skipped). This continues through checks, tagmaps, adjudication, and author pages.
+Use `--no-progress` to disable these periodic lines; ordinary status messages,
+errors, and the final report remain visible. Dry runs omit the periodic lines.
+Use `--verbose` to log each dispatch and completion, including recording artifacts,
+review batches, tagmap requests, and author work. Failures and skipped results are
+identified explicitly. Both flags can be combined:
+
+```sh
+bin/inductor -r /path/to/library run --verbose --no-progress
+```
 
 ## Commands
 

@@ -186,7 +186,9 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 			for i, j := range part {
 				blocks = append(blocks, fmt.Sprintf("=== %d\n%s", i+1, AuthorMaterial(str(j.Doc.Data["id"]), j.Doc.Data, j.Work)))
 			}
+			complete := startRunWork(ctx, fmt.Sprintf("author synopses %d-%d/%d", start+1, start+len(part), len(rows)))
 			synopses, err = e.API.ChatJSON(ctx, o.Model, messages(prompt("authors_synopsis_system"), prompt("authors_synopsis_shape")+"\n\nCREATORS:\n"+strings.Join(blocks, "\n\n")), TokenCeiling, .4)
+			complete(err)
 			if err != nil {
 				return report, err
 			}
@@ -215,7 +217,9 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 			if turn > 0 {
 				temp = .2
 			}
+			complete := startRunWork(ctx, fmt.Sprintf("author prompts %d-%d/%d attempt %d", start+1, start+len(part), len(rows), turn+1))
 			reply, err := e.API.ChatJSON(ctx, o.Model, messages(prompt("authors_system"), prompt("authors_shape")+"\n\nTYPEFACES to choose from:\n"+FontChoices()+"\n\nCREATORS:\n"+strings.Join(blocks, "\n\n")), TokenCeiling, temp)
+			complete(err)
 			if err != nil {
 				return report, err
 			}
@@ -247,7 +251,9 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 				if o.Render && (o.Redo || stale || !truth(j.Doc.Data["image"])) && o.Write {
 					dest := filepath.Join(e.Config.Covers, str(j.Doc.Data["id"]), "_author.png")
 					if o.Redo || stale || !exists(dest) {
+						complete := startRunWork(ctx, "author artwork "+str(j.Doc.Data["id"]))
 						err = e.Generate(ctx, text, dest, "")
+						complete(err)
 						if err != nil {
 							e.Say("author art %s: %v", str(j.Doc.Data["id"]), err)
 							if _, saveErr := SaveDocument(j.Doc.Path, j.Doc.Data); saveErr != nil {
@@ -307,7 +313,10 @@ func (e *Engine) CoverPrompts(ctx context.Context, model string, workers, limit 
 		for i, p := range part {
 			lines = append(lines, fmt.Sprintf("%d. %s", i+1, p))
 		}
-		return e.API.ChatJSON(ctx, model, messages(prompt("coverprompts_system"), prompt("coverprompts_shape")+"\n\nPROMPTS:\n"+strings.Join(lines, "\n")), TokenCeiling, .3)
+		complete := startRunWork(ctx, fmt.Sprintf("cover prompt translation (%d prompts)", len(part)))
+		reply, err := e.API.ChatJSON(ctx, model, messages(prompt("coverprompts_system"), prompt("coverprompts_shape")+"\n\nPROMPTS:\n"+strings.Join(lines, "\n")), TokenCeiling, .3)
+		complete(err)
+		return reply, err
 	})
 	for i, reply := range replies {
 		if errs[i] != nil {
@@ -335,6 +344,9 @@ func (e *Engine) CoverPrompts(ctx context.Context, model string, workers, limit 
 		}
 	}
 	report["missed"] = len(promptsList) - integer(report["translated"])
+	if integer(report["missed"]) > 0 {
+		return report, fmt.Errorf("%d cover prompt(s) could not be translated", integer(report["missed"]))
+	}
 	return report, nil
 }
 func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int, redo, write bool) (Record, error) {
@@ -347,7 +359,7 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		if author != "" && str(d.Data["author"]) != author {
 			continue
 		}
-		if !truth(d.Data["cover"]) || !contains(texts(record(d.Data["provenance"])["generated"]), "cover") {
+		if truth(d.Data["cover"]) && !contains(texts(record(d.Data["provenance"])["generated"]), "cover") {
 			continue
 		}
 		p, _ := PromptFor(nil, e.Config.Enrich.CoverEngine, d.Data)
@@ -362,7 +374,8 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		// exactly the covers most in need of drawing. Thirty-eight of them sat
 		// through every run of this command untouched, each one a warning in the
 		// build and a missing picture on the site.
-		if redo || w == 0 || w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight {
+		negative := str(record(d.Data["cover_prompts"])["negative"])
+		if redo || !truth(d.Data["cover"]) || w == 0 || w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight || ArtStale(record(d.Data["provenance"]), p, negative, e.Config.Enrich.CoverEngine) {
 			rows = append(rows, d)
 		}
 	}
@@ -373,11 +386,17 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 	if !write {
 		return report, nil
 	}
-	_, errs := parallelMap(ctx, rows, workers, func(ctx context.Context, d Document) (bool, error) {
+	_, errs := parallelMap(ctx, rows, workers, func(ctx context.Context, d Document) (changed bool, workErr error) {
+		complete := startRunWork(ctx, "repair artwork "+str(d.Data["author"])+"/"+str(d.Data["id"]))
+		defer func() { complete(workErr) }()
 		engine := e.Config.Enrich.CoverEngine
 		p, _ := PromptFor(nil, engine, d.Data)
 		dest := e.Config.Resolved(str(d.Data["cover"]), filepath.Dir(d.Path))
-		if err := e.Generate(ctx, p, dest, ""); err != nil {
+		if !truth(d.Data["cover"]) {
+			dest = filepath.Join(e.Config.Covers, str(d.Data["author"]), str(d.Data["id"])+".png")
+		}
+		negative := str(record(d.Data["cover_prompts"])["negative"])
+		if err := e.Generate(ctx, p, dest, negative); err != nil {
 			return false, err
 		}
 		ok, err := DrawNameplate(dest, str(d.Data["title"]), e.CoverFont(str(d.Data["author"])), true)
@@ -386,7 +405,9 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		}
 		// The picture changed even though its path did not, so the document has
 		// to be written back for the stamp to survive the run.
-		StampArt(nested(d.Data, "provenance"), p, "", engine)
+		StampArt(nested(d.Data, "provenance"), p, negative, engine)
+		MarkGenerated(nested(d.Data, "provenance"), "cover")
+		d.Data["cover"] = e.Config.Portable(dest, filepath.Dir(d.Path))
 		_, err = SaveDocument(d.Path, d.Data)
 		return ok, err
 	})
@@ -397,6 +418,9 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		} else {
 			report["drawn"] = integer(report["drawn"]) + 1
 		}
+	}
+	if integer(report["failed"]) > 0 {
+		return report, fmt.Errorf("%d artwork repair(s) failed", integer(report["failed"]))
 	}
 	return report, nil
 }
