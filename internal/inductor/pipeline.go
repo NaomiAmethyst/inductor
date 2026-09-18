@@ -89,19 +89,81 @@ func GraphPlan(states map[string]map[string]bool, graph []Artifact) (Record, err
 	}
 	return Record{"recordings": len(states), "finished": finished, "artefacts": todo, "lanes": lanes, "submissions": submissions}, nil
 }
+
+// artifactProbe is what every artefact check needs and none of them should
+// fetch for itself: the fingerprint, the transcript, and the analysis record.
+//
+// ArtifactExists is asked about eight artefacts per recording, and four of
+// those answers each re-read the transcript, re-hashed its whole text and
+// re-read the analysis beside it. Over a library of nine thousand that is some
+// gigabytes of JSON parsed to answer the same question eight times. Resolve it
+// once per recording and hand it round.
+type artifactProbe struct {
+	e          *Engine
+	j          Planned
+	fp         string
+	fpErr      error
+	transcript Record
+	store      Record
+	read       bool
+}
+
+func (e *Engine) probe(j Planned) *artifactProbe { return &artifactProbe{e: e, j: j} }
+
+func (p *artifactProbe) fingerprint() (string, error) {
+	if p.fp == "" && p.fpErr == nil {
+		p.fp, p.fpErr = p.e.fingerprint(p.j)
+	}
+	return p.fp, p.fpErr
+}
+
+// enrichment is the transcript and whatever the models made of it, fetched at
+// most once however many artefacts ask.
+func (p *artifactProbe) enrichment() (Record, Record) {
+	if p.read {
+		return p.transcript, p.store
+	}
+	p.read = true
+	fp, err := p.fingerprint()
+	if err != nil {
+		return nil, nil
+	}
+	p.transcript = p.e.transcript(fp)
+	if p.transcript != nil {
+		p.store = p.e.Store.Peek(TranscriptKey(str(p.transcript["text"])), fp)
+	}
+	return p.transcript, p.store
+}
+
 func (e *Engine) ArtifactExists(name string, j Planned, redo []string, overwrite bool) bool {
+	return e.probe(j).exists(name, redo, overwrite)
+}
+
+func (p *artifactProbe) exists(name string, redo []string, overwrite bool) bool {
+	e, j := p.e, p.j
 	if contains(redo, name) {
 		return false
 	}
 	if name == "media" {
-		return PlacedAudio(e.Config, j.Source, j.Stem) != ""
+		placed := PlacedAudio(e.Config, j.Source, j.Stem)
+		if placed == "" {
+			return false
+		}
+		// Playable, so far as is already known. Only a verdict that has been
+		// reached counts here: this runs eight times a recording in two hot
+		// loops, and deciding it by decoding would play the whole library.
+		// A file nobody has judged yet is taken as placed; the stages that
+		// actually decode it will find the trouble and repair or refuse it.
+		complaint, _, known := e.Soundness.Peek(placed)
+		return !known || complaint == ""
 	}
-	fp, err := e.fingerprint(j)
+	fp, err := p.fingerprint()
 	if err != nil {
 		return false
 	}
 	if name == "transcript" {
-		return truth(e.transcript(fp))
+		t, _ := p.enrichment()
+		return truth(t)
 	}
 	if name == "measurements" {
 		return e.Acoustic.Has(fp)
@@ -109,18 +171,38 @@ func (e *Engine) ArtifactExists(name string, j Planned, redo []string, overwrite
 	if name == "voiceprint" {
 		return exists(filepath.Join(e.Config.Cache, "voiceprints", fp+".json"))
 	}
-	p := e.transcript(fp)
-	if p == nil {
+	t, r := p.enrichment()
+	if t == nil {
 		return false
 	}
-	r := e.Store.Peek(TranscriptKey(str(p["text"])), fp)
 	switch name {
 	case "analysis":
 		return truth(r["analysis"])
 	case "review":
 		return truth(r["final"])
 	case "cover":
-		return exists(filepath.Join(e.Config.Covers, j.Source.AuthorID(), ItemID(j.Source.AuthorID(), j.Stem)+".png"))
+		// This predicate has to answer the *producer's* question, not its own:
+		// RenderCover declines whenever the item already declares a cover, so
+		// any other answer here schedules work that will refuse to happen --
+		// silently, on a lane one job wide, on every run forever. The item's
+		// `cover:` field is that declaration, and it is authoritative because
+		// the path it names need not be `<id>.png` at all: a cover that came
+		// with the source is placed under its own extension. Probing the disk
+		// for a .png missed those, and missed the ids that part company with
+		// the filename over an apostrophe -- "stop-don-t-listen" against
+		// "stop-dont-listen". Between them, 281 jpgs and 501 apostrophes.
+		item := optionalYAML(j.Path)
+		if truth(item["cover"]) {
+			return true
+		}
+		author := j.Source.AuthorID()
+		if exists(filepath.Join(e.Config.Covers, author, ItemID(author, j.Stem)+".png")) {
+			return true
+		}
+		if id := str(item["id"]); id != "" {
+			return exists(filepath.Join(e.Config.Covers, author, id+".png"))
+		}
+		return false
 	case "entry":
 		return exists(j.Path) && !overwrite
 	}
@@ -161,17 +243,38 @@ func (e *Engine) produce(ctx context.Context, name string, jobs []Planned, o Run
 			// so refusing here stops a broken file reaching transcription,
 			// measurement or the item writer at all.
 			if errs[i] = e.soundEnough(ctx, j); errs[i] == nil {
-				_, errs[i] = PlaceMedia(ctx, e.Config, j.Source, j.Stem)
+				// A file that decodes with malformed frames is re-encoded here
+				// rather than linked, which is what makes the strict decoder
+				// downstream accept it.
+				complaint, recoverable, _ := e.audioTrouble(ctx, j.Source.AudioPath(e.Config.Sources))
+				if recoverable {
+					e.Say("re-encoding %s, which decodes whole but upsets a strict decoder: %s", j.Stem, complaint)
+				}
+				_, errs[i] = PlaceMedia(ctx, e.Config, j.Source, j.Stem, recoverable)
 			}
 		case "transcript":
-			errs[i] = e.Transcribe(ctx, j, false, contains(o.Redo, name))
+			// Vetted before the GPU is asked: a file that will not decode here
+			// will not decode there either, and staging it only moves the
+			// failure somewhere harder to read.
+			if errs[i] = e.soundEnough(ctx, j); errs[i] == nil {
+				errs[i] = e.Transcribe(ctx, j, false, contains(o.Redo, name))
+			}
 		case "voiceprint":
-			errs[i] = e.Transcribe(ctx, j, true, contains(o.Redo, name))
+			if errs[i] = e.soundEnough(ctx, j); errs[i] == nil {
+				errs[i] = e.Transcribe(ctx, j, true, contains(o.Redo, name))
+			}
 		case "measurements":
-			fp, err := e.fingerprint(j)
+			// The acoustics decode the file too, and a damaged one yields
+			// measurements of whatever ffmpeg managed before it gave up --
+			// which is worse than none, because an envelope taken from broken
+			// audio still correlates against everything and matches nothing.
+			err := e.soundEnough(ctx, j)
 			if err == nil {
-				audio := PlacedAudio(e.Config, j.Source, j.Stem)
-				_, err = e.Acoustic.Analyze(ctx, fp, audio, contains(o.Redo, name))
+				var fp string
+				if fp, err = e.fingerprint(j); err == nil {
+					audio := PlacedAudio(e.Config, j.Source, j.Stem)
+					_, err = e.Acoustic.Analyze(ctx, fp, audio, contains(o.Redo, name))
+				}
 			}
 			errs[i] = err
 		case "analysis":
@@ -253,8 +356,9 @@ func (e *Engine) RunGraph(ctx context.Context, jobs []Planned, o RunOptions) (Re
 	for i, j := range jobs {
 		states[i] = map[string]int{}
 		have := map[string]bool{}
+		probe := e.probe(j)
 		for _, a := range Graph {
-			if !(a.Name == "entry" && o.RefreshEntries) && e.ArtifactExists(a.Name, j, o.Redo, o.Overwrite) {
+			if !(a.Name == "entry" && o.RefreshEntries) && probe.exists(a.Name, o.Redo, o.Overwrite) {
 				states[i][a.Name] = 2
 				have[a.Name] = true
 				status.Cached++
@@ -418,6 +522,7 @@ func (e *Engine) RunGraph(ctx context.Context, jobs []Planned, o RunOptions) (Re
 			return counts, ctx.Err()
 		}
 	}
+	finishGraphProgress(ctx)
 	failed := 0
 	for k, v := range counts {
 		if strings.HasSuffix(k, ":failed") {

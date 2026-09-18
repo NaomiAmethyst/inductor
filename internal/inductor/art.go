@@ -162,18 +162,26 @@ func ArtKey(text, negative, engine string) string {
 // that has always done the same for the written half. Without it a document
 // carries a prompt and a picture with nothing to say they belong together, and
 // a prompt rewritten later leaves the two describing different things silently.
-func StampArt(prov Record, text, negative, engine string) {
-	prov["image_from"] = Record{"prompt": ArtKey(text, negative, engine), "engine": engine}
+func StampArt(prov Record, text, negative, engine, nameplate string) {
+	prov["image_from"] = Record{"prompt": ArtKey(text, negative, engine), "engine": engine,
+		"nameplate": nameplate}
 }
 
 // ArtStale says whether the picture was drawn from words that have since moved
 // on. An unstamped picture is *not* called stale: every image made before this
 // was recorded is unstamped, and answering otherwise would order the whole
 // library redrawn on the strength of a missing field rather than a changed one.
-func ArtStale(prov Record, text, negative, engine string) bool {
+func ArtStale(prov Record, text, negative, engine, nameplate string) bool {
 	was := record(prov["image_from"])
 	if len(was) == 0 {
 		return false
+	}
+	// The title is painted onto the picture, so renaming a recording leaves the
+	// cover announcing what it used to be called. Compared as a field rather
+	// than folded into the digest: a stamp written before this existed has no
+	// nameplate to compare, and should not be called stale for lacking one.
+	if plate, ok := was["nameplate"]; ok && str(plate) != nameplate {
+		return true
 	}
 	return str(was["prompt"]) != ArtKey(text, negative, engine)
 }
@@ -345,7 +353,7 @@ func (e *Engine) RenderCover(ctx context.Context, item, final Record, redraw boo
 	if err := e.Generate(ctx, p, dest, negative); err != nil {
 		return "", err
 	}
-	StampArt(nested(item, "provenance"), p, negative, e.Config.Enrich.CoverEngine)
+	StampArt(nested(item, "provenance"), p, negative, e.Config.Enrich.CoverEngine, str(item["title"]))
 	_, err := DrawNameplate(dest, str(item["title"]), e.CoverFont(str(item["author"])), true)
 	return dest, err
 }

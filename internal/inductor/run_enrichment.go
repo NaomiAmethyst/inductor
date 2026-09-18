@@ -5,32 +5,43 @@ import "path/filepath"
 
 // Check artifacts before applying --limit, so complete entries cannot consume
 // the limit and indefinitely hide later recordings with missing work.
-func (e *Engine) runJobOutstanding(j Planned, a Arguments) bool {
+//
+// The registry and the creators' tag maps are passed in rather than read here.
+// They used to be loaded inside this function, which runs once per recording:
+// on a library of nine thousand that re-read and re-parsed a 48 KB registry
+// nine thousand times over -- the better part of half a gigabyte of YAML for
+// one file that cannot change while the loop runs, and minutes of a run in
+// which nothing whatever appeared to happen.
+func (e *Engine) runJobOutstanding(j Planned, a Arguments, reg *Registry, maps map[string]Record) bool {
+	probe := e.probe(j)
 	for _, artifact := range Graph {
 		if artifact.Name == "cover" && (a.Bool("no_covers") || !e.Config.Enrich.Covers) {
 			continue
 		}
-		if !e.ArtifactExists(artifact.Name, j, nil, false) {
+		if !probe.exists(artifact.Name, nil, false) {
 			return true
 		}
 	}
-	fp, err := e.fingerprint(j)
-	if err != nil {
+	if _, err := probe.fingerprint(); err != nil {
 		return true
 	}
-	transcript := e.transcript(fp)
-	final := record(e.Store.Peek(TranscriptKey(str(transcript["text"])), fp)["final"])
+	_, stored := probe.enrichment()
+	final := record(stored["final"])
 	item := optionalYAML(j.Path)
 	for _, field := range []string{"summary", "description", "spoilers"} {
 		if !truth(item[field]) && truth(final[field]) {
 			return true
 		}
 	}
-	reg, err := LoadRegistry(e.Config.RegistryPath())
-	if err != nil {
+	if reg == nil {
 		return true
 	}
-	mapping := LoadMapping(e.Config, j.Source.AuthorID())
+	author := j.Source.AuthorID()
+	mapping, ok := maps[author]
+	if !ok {
+		mapping = LoadMapping(e.Config, author)
+		maps[author] = mapping
+	}
 	for _, tag := range append(texts(j.Source.Data["tags"]), texts(final["tags"])...) {
 		canonical, _ := reg.Resolve(tag, mapping)
 		if canonical != "" && !contains(texts(item["tags"]), canonical) {

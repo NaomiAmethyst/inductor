@@ -265,6 +265,7 @@ func Main(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 	}
 	engine := NewEngine(c)
 	engine.Colour = colourAvailable(stdout)
+	engine.Out = stdout
 	var outputMu sync.Mutex
 	engine.Say = func(format string, v ...any) {
 		outputMu.Lock()
@@ -279,7 +280,13 @@ func Main(ctx context.Context, argv []string, stdout, stderr io.Writer) int {
 		report["usage"] = usage
 	}
 	if report != nil {
-		b, _ := json.MarshalIndent(report, "", "  ")
+		shown := report
+		// A terminal gets the findings as a line each and a path to the rest.
+		// Anything else -- a pipe, a log, a caller parsing this -- gets it whole.
+		if engine.Colour && !a.Bool("full_report") {
+			shown = forReading(report)
+		}
+		b, _ := json.MarshalIndent(shown, "", "  ")
 		fmt.Fprintln(stdout, string(b))
 	}
 	closeErr := engine.Close()
@@ -297,7 +304,7 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 	model := a.String("model")
 	switch a.Command {
 	case "check":
-		r, err := LoadSources(c.Sources)
+		r, err := e.loadSources()
 		if err != nil {
 			return nil, err
 		}
@@ -423,6 +430,9 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 		if model == "" {
 			model = c.Enrich.AnalysisModel
 		}
+		if f := a.String("apply"); f != "" {
+			return e.ApplyTitleRulings(f, a.String("author"), a.Bool("write"), a.Bool("no_series"), a.Bool("no_variants"))
+		}
 		return e.Retitle(ctx, a.String("author"), model, a.Int("limit"), a.Bool("tidy"), a.Bool("write"))
 	case "cover-prompts":
 		if model == "" {
@@ -445,7 +455,7 @@ func (e *Engine) Dispatch(ctx context.Context, a Arguments) (Record, error) {
 	case "voiceprint":
 		return e.voiceCommand(ctx, a)
 	case "acoustic":
-		sources, err := LoadSources(c.Sources)
+		sources, err := e.loadSources()
 		if err != nil {
 			return nil, err
 		}

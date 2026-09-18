@@ -421,39 +421,73 @@ func PendingTags(c Config, fromReviews bool) (map[string]Record, error) {
 	}
 	return out, nil
 }
+
+// tagVocabulary is the half of tag-map building that is the same for every
+// creator: what the registry says, which tags each creator uses and how often.
+// Worked out once so a creator's map can be built on its own without paying for
+// a sweep of the whole library each time.
+type tagVocabulary struct {
+	reg    *Registry
+	counts map[string]map[string]int
+	titles map[string][]string
+}
+
+// Worked out afresh on each call. It was briefly memoised on the engine, which
+// was wrong: items change while a run is going -- the graph writes them, and a
+// creator's tags with them -- so a vocabulary held from earlier answers about a
+// library that has moved on. Shared within one sweep by passing it, not by
+// remembering it.
+func (e *Engine) tagVocabulary() (*tagVocabulary, error) {
+	{
+		c := e.Config
+		report, err := e.loadSources()
+		if err != nil {
+			return nil, err
+		}
+		reg, err := LoadRegistry(c.RegistryPath())
+		if err != nil {
+			return nil, err
+		}
+		v := &tagVocabulary{reg: reg, counts: map[string]map[string]int{}, titles: map[string][]string{}}
+		for _, s := range report.Sources {
+			a := s.AuthorID()
+			if v.counts[a] == nil {
+				v.counts[a] = map[string]int{}
+			}
+			v.titles[a] = append(v.titles[a], s.Title)
+			for _, tag := range texts(s.Data["tags"]) {
+				v.counts[a][strings.TrimSpace(tag)]++
+			}
+		}
+		if docs, err := e.Index.Entries(c.Content); err == nil {
+			for _, d := range docs {
+				a := str(d.Data["author"])
+				if v.counts[a] == nil {
+					v.counts[a] = map[string]int{}
+				}
+				for _, tag := range texts(d.Data["tags"]) {
+					v.counts[a][tag]++
+				}
+			}
+		}
+		return v, nil
+	}
+}
+
+// looseTag is a tag with its whitespace made ordinary, for comparing what was
+// asked against what came back.
+func looseTag(t string) string {
+	return strings.ToLower(strings.Join(strings.Fields(strings.NewReplacer(
+		"\u00a0", " ", "\u2007", " ", "\u202f", " ").Replace(t)), " "))
+}
+
 func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model string, dry bool) (Record, error) {
 	c := e.Config
-	report, err := LoadSources(c.Sources)
+	v, err := e.tagVocabulary()
 	if err != nil {
 		return nil, err
 	}
-	reg, err := LoadRegistry(c.RegistryPath())
-	if err != nil {
-		return nil, err
-	}
-	counts := map[string]map[string]int{}
-	titles := map[string][]string{}
-	for _, s := range report.Sources {
-		a := s.AuthorID()
-		if counts[a] == nil {
-			counts[a] = map[string]int{}
-		}
-		titles[a] = append(titles[a], s.Title)
-		for _, tag := range texts(s.Data["tags"]) {
-			counts[a][strings.TrimSpace(tag)]++
-		}
-	}
-	if docs, err := Documents(c.Content, "item"); err == nil {
-		for _, d := range docs {
-			a := str(d.Data["author"])
-			if counts[a] == nil {
-				counts[a] = map[string]int{}
-			}
-			for _, tag := range texts(d.Data["tags"]) {
-				counts[a][tag]++
-			}
-		}
-	}
+	reg, counts, titles := v.reg, v.counts, v.titles
 	if len(authors) == 0 {
 		authors = sortedKeys(counts)
 	}
@@ -482,7 +516,9 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 			return todo[i] < todo[j]
 		})
 		total["asked"] = integer(total["asked"]) + len(todo)
-		e.Say("%s: %d tag(s) to rule on", a, len(todo))
+		if len(todo) > 0 {
+			e.Say("%s: %d tag(s) to rule on", a, len(todo))
+		}
 		if dry {
 			continue
 		}
@@ -512,11 +548,18 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 				missing = append(missing, part...)
 				continue
 			}
+			// Match on the words, not the bytes. A tag carrying a non-breaking
+			// space comes back with an ordinary one, and comparing exactly then
+			// reads a perfectly good ruling as a missing one.
+			asked := map[string]string{}
+			for _, t := range part {
+				asked[looseTag(t)] = t
+			}
 			fresh := map[string]bool{}
 			for _, v := range array(reply["mapping"]) {
 				r := record(v)
-				t := str(r["tag"])
-				if !contains(part, t) {
+				t, ok := asked[looseTag(str(r["tag"]))]
+				if !ok {
 					continue
 				}
 				fresh[t] = true
@@ -540,11 +583,18 @@ func (e *Engine) BuildTagmaps(ctx context.Context, authors []string, model strin
 				}
 				known[t] = r
 			}
+			unruled := []string{}
 			for _, t := range part {
 				if !fresh[t] {
 					missing = append(missing, t)
-					failures = append(failures, fmt.Errorf("tagmap %s: no ruling for %q", a, t))
+					unruled = append(unruled, t)
 				}
+			}
+			// Left for the next pass rather than failing this one: a tag nobody
+			// ruled on stays in the queue, and the creators after this one still
+			// get their maps built.
+			if len(unruled) > 0 {
+				e.Say("%s: %d tag(s) came back unruled, still queued", a, len(unruled))
 			}
 		}
 		if len(todo) > 0 {

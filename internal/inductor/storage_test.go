@@ -57,6 +57,10 @@ func testConfig(t *testing.T) Config {
 		t.Fatal(err)
 	}
 	c.Enrich.Covers = false
+	// A fixture asks for exactly the calls it stubs. The shipped fallback would
+	// add one more whenever a review did not parse, which is a thing several
+	// tests arrange on purpose.
+	c.Enrich.ReviewFallback = nil
 	c.MediaSettings.Transcode = "never"
 	putRecord(t, c.RegistryPath(), Record{"content": Record{"Hypnosis": "A hypnotic recording.", "Relaxation": "Relaxing material."}, "voice": Record{"fem": "Feminine voice.", "masc": "Masculine voice."}, "audience": Record{"man": "Addresses a man."}})
 	return c
@@ -301,7 +305,7 @@ func TestCachedIngestPreservesCuratedFieldsAndExistingName(t *testing.T) {
 	if err = e.Store.Put(TranscriptKey(text), Record{"analysis": Record{"summary": "analysis"}, "final": Record{"summary": "Generated summary.", "description": "Model description.", "tags": []string{"Relaxation"}}}, fp, "fixture"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err = PlaceMedia(context.Background(), c, j.Source, j.Stem); err != nil {
+	if _, err = PlaceMedia(context.Background(), c, j.Source, j.Stem, false); err != nil {
 		t.Fatal(err)
 	}
 	if err = e.Emit(context.Background(), j, false, false, false); err != nil {
@@ -457,65 +461,96 @@ func TestArtIsStaleWhenItsPromptIsRestated(t *testing.T) {
 	}
 }
 
-func TestArtRemembersTheWordsThatDrewIt(t *testing.T) {
+func TestArtRemembersTheWordsThatDrewItAndTheNameOnIt(t *testing.T) {
 	prov := Record{}
-	StampArt(prov, "violet smoke, tarot", "blurry", "turbo")
-	if str(record(prov["image_from"])["engine"]) != "turbo" || str(record(prov["image_from"])["prompt"]) == "" {
-		t.Fatal("the stamp records neither engine nor prompt", prov)
+	StampArt(prov, "violet smoke, tarot", "blurry", "turbo", "The Quiet Room")
+	stamp := record(prov["image_from"])
+	if str(stamp["engine"]) != "turbo" || str(stamp["prompt"]) == "" || str(stamp["nameplate"]) != "The Quiet Room" {
+		t.Fatal("the stamp is missing part of what drew the picture", prov)
 	}
-	if ArtStale(prov, "violet smoke, tarot", "blurry", "turbo") {
+	if ArtStale(prov, "violet smoke, tarot", "blurry", "turbo", "The Quiet Room") {
 		t.Fatal("the same instruction should not read as stale")
 	}
-	// Each half of the instruction, and the engine that picks the wording, is
-	// enough to make a different picture.
-	for _, c := range [][3]string{
-		{"green smoke, tarot", "blurry", "turbo"},
-		{"violet smoke, tarot", "washed out", "turbo"},
-		{"violet smoke, tarot", "blurry", "flux"},
+	// Any half of the instruction the renderer reads, and the title painted on
+	// top of it, is enough to make a different picture.
+	for _, c := range [][4]string{
+		{"green smoke, tarot", "blurry", "turbo", "The Quiet Room"},
+		{"violet smoke, tarot", "washed out", "turbo", "The Quiet Room"},
+		{"violet smoke, tarot", "blurry", "flux", "The Quiet Room"},
+		{"violet smoke, tarot", "blurry", "turbo", "The Quiet Room (Extended)"},
 	} {
-		if !ArtStale(prov, c[0], c[1], c[2]) {
+		if !ArtStale(prov, c[0], c[1], c[2], c[3]) {
 			t.Fatalf("a changed instruction should read as stale: %v", c)
 		}
 	}
-	// Every picture drawn before this was recorded carries no stamp. Calling
-	// those stale would order the whole library redrawn over a missing field.
-	if ArtStale(Record{}, "anything", "", "turbo") {
+	// A picture stamped before nameplates were recorded has none to compare,
+	// and must not be called stale merely for lacking the field.
+	older := Record{"image_from": Record{"prompt": ArtKey("violet smoke, tarot", "blurry", "turbo"), "engine": "turbo"}}
+	if ArtStale(older, "violet smoke, tarot", "blurry", "turbo", "Renamed Since") {
+		t.Fatal("an older stamp was invalidated by a field it never had")
+	}
+	// And a picture with no stamp at all is left alone.
+	if ArtStale(Record{}, "anything", "", "turbo", "Anything") {
 		t.Fatal("an unstamped picture must not read as stale")
 	}
 }
 
-func TestBrokenAudioIsRefusedBeforeAnythingProcessesIt(t *testing.T) {
+func TestAudioIsRepairedWhenItRecoversAndRefusedWhenItDoesNot(t *testing.T) {
 	c := testConfig(t)
 	e := NewEngine(c)
 	defer e.Close()
-	sound := filepath.Join(c.Root, "sound.mp3")
-	putAudio(t, sound, 1)
-	broken := filepath.Join(c.Root, "broken.mp3")
-	putFile(t, broken, bytes.Repeat([]byte("not audio at all"), 64))
 
-	if complaint, err := e.Soundness.Of(context.Background(), sound); err != nil || complaint != "" {
-		t.Fatal("clean audio was called broken", complaint, err)
+	sound := filepath.Join(c.Root, "sound.mp3")
+	putAudio(t, sound, 3)
+	if complaint, recovered, err := e.Soundness.Of(context.Background(), sound); err != nil || complaint != "" || recovered < recoveryFloor {
+		t.Fatal("clean audio was called damaged", complaint, recovered, err)
 	}
-	complaint, err := e.Soundness.Of(context.Background(), broken)
-	if err != nil || complaint == "" {
-		t.Fatal("a file that does not decode was called sound", complaint, err)
+
+	// Frame damage: the file still holds all its audio, the decoder grumbles
+	// past it. Worth re-encoding, not worth discarding.
+	scratched := filepath.Join(c.Root, "scratched.mp3")
+	whole, err := os.ReadFile(sound)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The verdict is kept, or every run pays to decode the library again.
+	hurt := append([]byte{}, whole...)
+	for i := len(hurt) / 2; i < len(hurt)/2+64 && i < len(hurt); i++ {
+		hurt[i] = 0xFF
+	}
+	putFile(t, scratched, hurt)
+	complaint, recovered, err := e.Soundness.Of(context.Background(), scratched)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if complaint != "" && recovered < recoveryFloor {
+		t.Skipf("this ffmpeg loses too much of a scratched file to judge repair: %.2f", recovered)
+	}
+
+	// Not audio at all: nothing comes out, so a re-encode would only launder
+	// the loss into a file that looks healthy.
+	rubbish := filepath.Join(c.Root, "rubbish.mp3")
+	putFile(t, rubbish, bytes.Repeat([]byte("not audio at all"), 64))
+	complaint, recovered, err = e.Soundness.Of(context.Background(), rubbish)
+	if err != nil || complaint == "" || recovered >= recoveryFloor {
+		t.Fatal("a file with no audio in it was called recoverable", complaint, recovered, err)
+	}
+	src := &Source{Path: rubbish, Audio: rubbish, Author: "Creator", Title: "Rubbish", Data: Record{}}
+	job := Planned{src, "rubbish", filepath.Join(c.Content, "creator", "rubbish.yaml")}
+	err = e.soundEnough(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "past repair") {
+		t.Fatalf("irrecoverable audio was not refused: %v", err)
+	}
+	if _, recoverable, dead := e.audioTrouble(context.Background(), rubbish); recoverable || !dead {
+		t.Fatal("irrecoverable audio was offered for repair")
+	}
+
+	// The verdict is kept, or every run decodes the library again.
 	if err := e.Soundness.Save(); err != nil {
 		t.Fatal(err)
 	}
 	again := NewSoundnessCache(filepath.Join(c.Cache, "soundness.json"))
-	if got, _ := again.Of(context.Background(), broken); got != complaint {
-		t.Fatalf("the verdict did not survive a reload: %q vs %q", got, complaint)
-	}
-
-	// And the graph refuses it rather than producing half an item.
-	s := &Source{Path: broken, Audio: broken, Author: "Creator", Title: "Broken", Data: Record{}}
-	job := Planned{s, "broken", filepath.Join(c.Content, "creator", "broken.yaml")}
-	if err := e.soundEnough(context.Background(), job); err == nil {
-		t.Fatal("the pipeline accepted audio that does not decode")
-	} else if !strings.Contains(err.Error(), "half a file") {
-		t.Fatalf("the refusal does not say why: %v", err)
+	if got, ratio, _ := again.Of(context.Background(), rubbish); got != complaint || ratio != recovered {
+		t.Fatalf("the verdict did not survive a reload: %q %.3f", got, ratio)
 	}
 }
 
@@ -570,5 +605,96 @@ func TestAnInterruptedRunLeavesAResumePoint(t *testing.T) {
 	}
 	if id, err := e.saveResume(jobs, done); err != nil || id != "" {
 		t.Fatal("a finished run should leave no resume point", id, err)
+	}
+}
+
+func TestSourcesAreParsedOncePerRunButNotPastAnEdit(t *testing.T) {
+	c := testConfig(t)
+	one := filepath.Join(c.Sources, "one.yaml")
+	putRecord(t, one, Record{"audio": filepath.Join(c.Root, "a.mp3"), "title": "First", "author": "Creator"})
+
+	first, err := LoadSources(c.Sources)
+	if err != nil || len(first.Sources) != 1 {
+		t.Fatal(first.Sources, err)
+	}
+	again, err := LoadSources(c.Sources)
+	if err != nil || len(again.Sources) != 1 {
+		t.Fatal(err)
+	}
+	// The same Sources come back, so a resolved path or fingerprint worked out
+	// by one caller is not worked out again by the next.
+	if again.Sources[0] != first.Sources[0] {
+		t.Fatal("a second load re-parsed instead of sharing the first")
+	}
+
+	// An edit between two loads must still be seen: the stamp is size and mtime,
+	// so make both differ.
+	time.Sleep(10 * time.Millisecond)
+	putRecord(t, one, Record{"audio": filepath.Join(c.Root, "a.mp3"), "title": "First Retitled Somewhat Longer", "author": "Creator"})
+	edited, err := LoadSources(c.Sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Sources[0].Title != "First Retitled Somewhat Longer" {
+		t.Fatalf("an edited source was served from memory: %q", edited.Sources[0].Title)
+	}
+
+	// And so must a new file alongside it.
+	putRecord(t, filepath.Join(c.Sources, "two.yaml"),
+		Record{"audio": filepath.Join(c.Root, "b.mp3"), "title": "Second", "author": "Creator"})
+	grown, err := LoadSources(c.Sources)
+	if err != nil || len(grown.Sources) != 2 {
+		t.Fatalf("a new source was missed: %d", len(grown.Sources))
+	}
+}
+
+func TestOrphansRemovesWhatInductorOwnsAndSparesWhatItDoesNot(t *testing.T) {
+	c := testConfig(t)
+	if err := os.MkdirAll(c.Sources, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Two entries whose source records are both gone. One says Inductor made
+	// it; the other says nothing, as a hand-written entry would.
+	mine := filepath.Join(c.Content, "creator", "mine.yaml")
+	putRecord(t, mine, Record{"kind": "Item", "id": "mine", "author": "creator", "title": "Mine",
+		"provenance": Record{"source_key": "/gone/mine.mp3", ManagedBy: ManagedByInductor}})
+	putRecord(t, strings.TrimSuffix(mine, ".yaml")+".transcript.yaml",
+		Record{"kind": "Transcript", "item": "mine", "text": "Evidence."})
+	theirs := filepath.Join(c.Content, "creator", "theirs.yaml")
+	putRecord(t, theirs, Record{"kind": "Item", "id": "theirs", "author": "creator", "title": "Theirs",
+		"provenance": Record{"source_key": "/gone/theirs.mp3"}})
+	putRecord(t, filepath.Join(c.Content, "creator", "_author.yaml"),
+		Record{"kind": "Author", "id": "creator", "name": "Creator"})
+
+	r, err := Orphans(c, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(texts(r["orphaned_items"]), mine) {
+		t.Fatal("an entry Inductor owns was not offered for removal", r["orphaned_items"])
+	}
+	if !contains(texts(r["unrecorded_items"]), theirs) {
+		t.Fatal("an unclaimed entry was not reported", r["unrecorded_items"])
+	}
+	if contains(texts(r["orphaned_items"]), theirs) {
+		t.Fatal("an unclaimed entry was offered for removal")
+	}
+	// Reporting changes nothing.
+	if !exists(mine) || !exists(theirs) {
+		t.Fatal("a report deleted something")
+	}
+
+	if _, err = Orphans(c, true); err != nil {
+		t.Fatal(err)
+	}
+	if exists(mine) {
+		t.Fatal("an entry Inductor owns outlived its source record")
+	}
+	if exists(strings.TrimSuffix(mine, ".yaml") + ".transcript.yaml") {
+		t.Fatal("the transcript was left behind")
+	}
+	// The one thing that must never happen.
+	if !exists(theirs) {
+		t.Fatal("an entry Inductor did not write was deleted")
 	}
 }

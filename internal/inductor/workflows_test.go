@@ -3,8 +3,10 @@ package inductor
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -446,5 +448,71 @@ func TestARulingRetiresTheQueueItAnswered(t *testing.T) {
 	}
 	if len(dangling) != 0 {
 		t.Fatal("a retired row points outside the registry:", dangling)
+	}
+}
+
+func TestARulingIsMatchedDespiteOddWhitespace(t *testing.T) {
+	// The tag as it sits in the library, with a non-breaking space in it.
+	asked := "Almost \u00a0Too Professional To Give In"
+	// The same tag as a model hands it back, spaced ordinarily.
+	replied := "Almost Too Professional To Give In"
+	if looseTag(asked) != looseTag(replied) {
+		t.Fatalf("a ruling on the same tag did not match: %q vs %q", looseTag(asked), looseTag(replied))
+	}
+	// Different tags must still be told apart.
+	if looseTag("Deep Trance") == looseTag("Deep Trance Training") {
+		t.Fatal("two different tags were folded together")
+	}
+	// Narrow and figure spaces are whitespace too.
+	if looseTag("Cum\u202fCommand") != looseTag("cum command") {
+		t.Fatal("a narrow space defeated the match")
+	}
+}
+
+// A variant group shares one title across its members -- that is what makes it
+// a group. Warning on the repeat told somebody to go and fix the thing the
+// library was deliberately doing, and buried the repeats that are duplicate
+// imports among hundreds that are not.
+func TestRepeatedTitleWarnsOnlyWhenTheVariantAlsoRepeats(t *testing.T) {
+	c := testConfig(t)
+	if err := os.MkdirAll(c.Sources, 0755); err != nil {
+		t.Fatal(err)
+	}
+	one := func(title, variant string, n int) string {
+		v := ""
+		if variant != "" {
+			v = "\nvariant: " + variant
+		}
+		return fmt.Sprintf("---\napiVersion: inductor/v1\nkind: Source\naudio: /tmp/a%d.mp3\ntitle: %s\nauthor: Creator%s\n", n, title, v)
+	}
+	body := one("Deepener", "For Men", 1) + one("Deepener", "For Sissies", 2) +
+		one("Clone", "", 3) + one("Clone", "", 4) +
+		one("Twice Over", "Long Cut", 5) + one("Twice Over", "Long Cut", 6)
+	if err := os.WriteFile(filepath.Join(c.Sources, "creator.yaml"), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r, err := LoadSources(c.Sources)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plain, sameVariant, distinct int
+	for _, w := range r.Warnings {
+		switch {
+		case strings.Contains(w, `"Deepener"`):
+			distinct++
+		case strings.Contains(w, `"Clone"`):
+			plain++
+		case strings.Contains(w, `"Twice Over"`):
+			sameVariant++
+		}
+	}
+	if distinct != 0 {
+		t.Errorf("warned about a title two distinct variants share: %v", r.Warnings)
+	}
+	if plain != 1 {
+		t.Errorf("want one warning for the unvarianted repeat, got %d: %v", plain, r.Warnings)
+	}
+	if sameVariant != 1 {
+		t.Errorf("want one warning for the repeated title+variant, got %d: %v", sameVariant, r.Warnings)
 	}
 }

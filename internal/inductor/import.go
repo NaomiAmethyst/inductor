@@ -159,7 +159,7 @@ func (e *Engine) Add(ctx context.Context, o AddOptions) (Record, error) {
 		}
 		taken[candidate] = true
 		known[fp] = candidate
-		r := Record{"apiVersion": "hypnotica/v1", "kind": "Item", "id": candidate, "title": title, "author": ident, "audio": path, "categories": []string{"Audio", "Hypnosis"}, "explicit": !o.NotExplicit, "needs": []string{"description", "summary", "tags", "spoilers"}, "provenance": Record{"added_from": path, "fingerprint": fp, "transcript": "pending"}}
+		r := Record{"apiVersion": "hypnotica/v1", "kind": "Item", "id": candidate, "title": title, "author": ident, "audio": path, "categories": []string{"Audio", "Hypnosis"}, "explicit": !o.NotExplicit, "needs": []string{"description", "summary", "tags", "spoilers"}, "provenance": Record{"added_from": path, "fingerprint": fp, "transcript": "pending", ManagedBy: ManagedByInductor}}
 		date := str(first(o.Date, meta["date"], meta["originaldate"]))
 		if match := releaseDate.FindString(date); match != "" {
 			r["date"] = match

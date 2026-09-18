@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -327,5 +329,55 @@ func TestWaitUnfinishedSitsOnABatchUntilItLands(t *testing.T) {
 	}
 	if s := str(readJSON(filepath.Join(c.Cache, "batches", "slow.json"))["status"]); s != "landed" {
 		t.Fatalf("journal reads %q", s)
+	}
+}
+
+// A model that will not describe the material answers with prose, an empty body
+// or an error. All three reach the lander as a review that does not parse, and
+// the recording is not at fault, so the work is offered to the next model
+// rather than dropped. The entry has to say who actually answered.
+func TestARefusedReviewIsOfferedToTheFallbackModel(t *testing.T) {
+	c := testConfig(t)
+	c.Enrich.ReviewModel = "declines:batch"
+	c.Enrich.ReviewFallback = []string{"obliges:batch"}
+	engine := NewEngine(c)
+	var asked []string
+	var mu sync.Mutex
+	engine.API = testAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			b, _ := io.ReadAll(r.Body)
+			var body Record
+			_ = decodeJSON(b, &body)
+			model := str(body["model"])
+			mu.Lock()
+			asked = append(asked, model)
+			mu.Unlock()
+			if strings.HasPrefix(model, "obliges") {
+				// The fallback is asked directly, not at batch latency.
+				replyJSON(t, w, chatReply(`{"summary":"described"}`))
+				return
+			}
+			replyJSON(t, w, Record{"id": "refused"})
+			return
+		}
+		replyJSON(t, w, Record{"status": "completed", "results": []any{
+			Record{"custom_id": "one", "body": chatReply("I cannot fulfill this request.")}}})
+	})
+	job := ReviewJob{ID: "one", Key: "text-key", Fingerprint: "audio-key"}
+	done, err := engine.RunReviews(context.Background(), []ReviewJob{job}, 1, 1, time.Millisecond, nil, false)
+	if err != nil || done != 1 {
+		t.Fatal("a refusal was left unanswered instead of being offered on", done, err)
+	}
+	got := engine.Store.Peek("text-key", "audio-key")
+	if str(record(got["final"])["summary"]) != "described" {
+		t.Fatal("the fallback's answer was not stored", got)
+	}
+	if m := str(got["review_model"]); m != "obliges" {
+		t.Fatalf("entry credits %q; the fallback wrote it", m)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 2 || !strings.HasPrefix(asked[0], "declines") || asked[1] != "obliges" {
+		t.Fatalf("asked %v; expected the first model then the fallback, without its batch suffix", asked)
 	}
 }

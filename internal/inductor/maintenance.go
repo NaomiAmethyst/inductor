@@ -58,9 +58,24 @@ func AttributeTree(c Config, redo, write bool) (Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := Record{"items": 0, "authors": 0, "unmatched": 0, "fields": 0}
+	out := Record{"items": 0, "authors": 0, "unmatched": 0, "fields": 0, "claimed": 0}
 	for _, d := range docs {
 		p := nested(d.Data, "provenance")
+		// Claim first, and for every entry: an item that already knows what was
+		// generated would otherwise skip the rest of this loop and never be
+		// claimed at all. Only entries whose source record is still there can be
+		// claimed -- that is the proof they are Inductor's. One whose source has
+		// already gone cannot be told from a hand-written entry, so it is left
+		// unclaimed and nothing will ever delete it.
+		if d.Kind == "item" && !truth(p[ManagedBy]) && byKey[str(p["source_key"])] != nil {
+			p[ManagedBy] = ManagedByInductor
+			out["claimed"] = integer(out["claimed"]) + 1
+			if write {
+				if _, err = SaveDocument(d.Path, d.Data); err != nil {
+					return out, err
+				}
+			}
+		}
 		if truth(p["generated"]) && !redo {
 			continue
 		}
@@ -133,7 +148,7 @@ func Orphans(c Config, write bool) (Record, error) {
 	if e != nil {
 		return nil, e
 	}
-	r := Record{"items": 0, "authors": 0, "transcripts": 0, "unreadable": []string{}, "undeclared": []string{}, "empty_authors": []string{}, "stray_transcripts": []string{}, "unrecorded_items": []string{}, "no_source_key": []string{}, "uningested": []string{}}
+	r := Record{"items": 0, "authors": 0, "transcripts": 0, "unreadable": []string{}, "undeclared": []string{}, "empty_authors": []string{}, "stray_transcripts": []string{}, "unrecorded_items": []string{}, "orphaned_items": []string{}, "no_source_key": []string{}, "uningested": []string{}}
 	docs := []Document{}
 	ids, madeBy, claimed, known := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	sr, e := LoadSources(c.Sources)
@@ -171,12 +186,33 @@ func Orphans(c Config, write bool) (Record, error) {
 			if key == "" {
 				r["no_source_key"] = append(texts(r["no_source_key"]), p)
 			} else if !known[key] {
-				r["unrecorded_items"] = append(texts(r["unrecorded_items"]), p)
+				// The source that made this is gone. If Inductor made it, it
+				// goes too, so that deleting a source entry deletes the entry
+				// from the site. If it carries no claim, it is somebody else's
+				// and only gets reported.
+				if str(prov[ManagedBy]) == ManagedByInductor {
+					r["orphaned_items"] = append(texts(r["orphaned_items"]), p)
+				} else {
+					r["unrecorded_items"] = append(texts(r["unrecorded_items"]), p)
+				}
 			}
 		}
 	}
+	orphaned := map[string]bool{}
+	for _, p := range texts(r["orphaned_items"]) {
+		orphaned[p] = true
+	}
 	for _, d := range docs {
 		remove := false
+		if d.Kind == "item" && orphaned[d.Path] {
+			// Inductor's own entry, whose source record is gone. Its transcript
+			// goes with it: left behind it would only be reported as stray on
+			// the next pass.
+			remove = true
+			if write {
+				_ = os.Remove(strings.TrimSuffix(d.Path, filepath.Ext(d.Path)) + ".transcript.yaml")
+			}
+		}
 		if d.Kind == "author" && !madeBy[str(first(d.Data["id"], filepath.Base(filepath.Dir(d.Path))))] {
 			r["empty_authors"] = append(texts(r["empty_authors"]), d.Path)
 			remove = true

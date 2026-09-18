@@ -367,3 +367,105 @@ func FoldTree(c Config, write bool) (Record, error) {
 	}
 	return report, nil
 }
+
+// TitleRulings is a reviewed verdict per recording, applied by `retitle --apply`.
+// A review of a whole library is somebody's judgement over thousands of titles;
+// it arrives as a file rather than a flag because it cannot be expressed as a
+// rule, and it is kept because it cost something to obtain.
+//
+//	apiVersion: inductor/v1
+//	kind: TitleRulings
+//	rulings:
+//	  - id: creator-some-recording          # the item's declared id
+//	    title: Some Recording               # optional: the corrected title
+//	    series: {name: Some Series, index: 2}
+//	    variant: {of: Base Title, distinguisher: Long Cut}
+//
+// A variant sets `title` to its base as well as `variant` to the distinguisher,
+// because that is what makes a group cohere: siblings share a title and differ
+// by variant. Ids and filenames never change -- ids are stable by convention,
+// and media and covers are named after the file stem, so renaming either would
+// strand them.
+func (e *Engine) ApplyTitleRulings(path, author string, write, noSeries, noVariants bool) (Record, error) {
+	doc, err := readYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	if k := str(doc["kind"]); k != "TitleRulings" {
+		return nil, fmt.Errorf("%s is a %q, not a TitleRulings", path, k)
+	}
+	rulings := map[string]Record{}
+	for _, row := range array(doc["rulings"]) {
+		r := record(row)
+		if id := str(r["id"]); id != "" {
+			rulings[id] = r
+		}
+	}
+	docs, err := Documents(e.Config.Content, "item")
+	if err != nil {
+		return nil, err
+	}
+	report := Record{"rulings": len(rulings), "retitled": 0, "series": 0, "variant": 0, "written": 0, "unmatched": 0}
+	seen := map[string]bool{}
+	for _, d := range docs {
+		id := str(d.Data["id"])
+		r, ok := rulings[id]
+		if !ok {
+			continue
+		}
+		// Seen means the library holds it, which is what unmatched reports on.
+		// Narrowing to one creator must not make the other 3,000 rulings look
+		// like they name recordings nobody has.
+		seen[id] = true
+		if author != "" && str(d.Data["author"]) != author {
+			continue
+		}
+		title := str(r["title"])
+		if v := record(r["variant"]); len(v) > 0 && !noVariants {
+			if base := str(v["of"]); base != "" {
+				title = base
+			}
+			if dist := str(v["distinguisher"]); dist != "" {
+				d.Data["variant"] = dist
+				report["variant"] = integer(report["variant"]) + 1
+			}
+		}
+		if s := record(r["series"]); len(s) > 0 && !noSeries {
+			if name := str(s["name"]); name != "" {
+				d.Data["series"] = name
+				if s["index"] != nil {
+					d.Data["series_index"] = s["index"]
+				}
+				report["series"] = integer(report["series"]) + 1
+			}
+		}
+		if title != "" && title != str(d.Data["title"]) {
+			p := nested(d.Data, "provenance")
+			if _, ok := p["original_title"]; !ok {
+				p["original_title"] = d.Data["title"]
+			}
+			// Not MarkGenerated: these are the creator's own titles with an
+			// export label or a filename artefact taken off, the same as
+			// --tidy. Claiming a person's words were machine-written is the
+			// one error the generated list exists to prevent.
+			p["retitled_by"] = "title rulings"
+			d.Data["title"] = title
+			report["retitled"] = integer(report["retitled"]) + 1
+		}
+		if write {
+			changed, err := SaveDocument(d.Path, d.Data)
+			if err != nil {
+				return report, err
+			}
+			if changed {
+				report["written"] = integer(report["written"]) + 1
+			}
+		}
+	}
+	for id := range rulings {
+		if !seen[id] {
+			report["unmatched"] = integer(report["unmatched"]) + 1
+		}
+	}
+	return report, nil
+}

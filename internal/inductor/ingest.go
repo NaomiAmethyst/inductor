@@ -4,6 +4,7 @@ package inductor
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,6 +18,11 @@ type Planned struct {
 	Stem, Path string
 }
 type PlanOptions struct {
+	// Watch follows the item index, Match the sources being placed against it.
+	// Planning a large library is minutes of otherwise silent work.
+	Watch, Match []func(done, total int)
+	// Stop lets an interrupt land mid-plan rather than after it.
+	Stop        func() error
 	Authors     []string
 	Limit       int
 	Needs       []string
@@ -25,7 +31,7 @@ type PlanOptions struct {
 }
 
 func PlanSources(c Config, report SourceReport, index *ItemIndex, fp *FingerprintCache, o PlanOptions) ([]Planned, error) {
-	entries, e := index.Entries(c.Content)
+	entries, e := index.Entries(c.Content, o.Watch...)
 	if e != nil {
 		return nil, e
 	}
@@ -80,7 +86,13 @@ func PlanSources(c Config, report SourceReport, index *ItemIndex, fp *Fingerprin
 	}
 	out := []Planned{}
 	seen := map[string]bool{}
-	for _, s := range report.Sources {
+	for n, s := range report.Sources {
+		if o.Stop != nil && o.Stop() != nil {
+			return nil, o.Stop()
+		}
+		for _, w := range o.Match {
+			w(n, len(report.Sources))
+		}
 		a := s.AuthorID()
 		if len(o.Authors) > 0 && !contains(o.Authors, a) {
 			continue
@@ -156,6 +168,7 @@ type Engine struct {
 	Box          *GPUBox
 	Say          func(string, ...any)
 	Colour       bool
+	Out          io.Writer
 	boxOnce      sync.Once
 	boxErr       error
 	noProvision  bool
@@ -180,19 +193,58 @@ func (e *Engine) Close() error {
 // Half a file is worse than none: a damaged recording still transcribes, still
 // gets analysed, and still becomes an item -- one that reads as complete and
 // plays as silence. Better to fail the job and say why.
+// audioTrouble reports what the decoder made of a file: a complaint if it
+// grumbled, and whether it failed outright. The two call for different things
+// -- a file that will not open is lost, one that decodes with malformed frames
+// only needs rewriting -- and conflating them had this refusing to process
+// recordings that were entirely intact.
+// Below this, what came out is too much less than what was promised for a
+// re-encode to be a repair: it would only launder the loss into a file that
+// looks healthy. Frame damage that the decoder skips costs a few milliseconds
+// and lands far above it.
+const recoveryFloor = 0.99
+
+func (e *Engine) audioTrouble(ctx context.Context, path string) (complaint string, recoverable, dead bool) {
+	complaint, recovered, err := e.Soundness.Of(ctx, path)
+	if err != nil {
+		return err.Error(), false, true
+	}
+	if complaint == "" {
+		return "", false, false
+	}
+	if recovered >= recoveryFloor {
+		return complaint, true, false
+	}
+	return fmt.Sprintf("%s (only %.0f%% of the audio decodes)", complaint, recovered*100), false, true
+}
+
 func (e *Engine) soundEnough(ctx context.Context, j Planned) error {
-	p := j.Source.AudioPath(e.Config.Sources)
+	// Whatever will actually be decoded. Checking only the source missed the
+	// whole library: media is skipped for anything already placed, so the check
+	// guarded new imports and nothing else, and damaged recordings already on
+	// disk went on failing transcription and voiceprinting run after run.
+	p := PlacedAudio(e.Config, j.Source, j.Stem)
+	if p == "" {
+		p = j.Source.AudioPath(e.Config.Sources)
+	}
 	if p == "" {
 		return fmt.Errorf("audio not found: %s", j.Source.Audio)
 	}
-	complaint, err := e.Soundness.Of(ctx, p)
-	if err != nil {
-		return err
-	}
-	if complaint != "" {
-		return fmt.Errorf("audio does not decode cleanly, refusing to process half a file: %s", complaint)
+	complaint, _, dead := e.audioTrouble(ctx, p)
+	if dead {
+		return fmt.Errorf("audio is damaged past repair, refusing to process it: %s", complaint)
 	}
 	return nil
+}
+
+// loadSources is LoadSources with something to look at. Parsing the records is
+// the one stretch of a run that used to pass in silence, and on a large library
+// it is the better part of a minute.
+func (e *Engine) loadSources() (SourceReport, error) {
+	step, finish := startLoading(e.Out, e.Colour, e.Say, "loading source records")
+	r, err := LoadSources(e.Config.Sources, step)
+	finish(len(r.Sources))
+	return r, err
 }
 
 func (e *Engine) fingerprint(j Planned) (string, error) {
@@ -391,6 +443,44 @@ func (e *Engine) UnreadBatches(wanted map[string]ReviewJob) []Record {
 	return out
 }
 
+// offerToFallbacks re-asks for the reviews nobody answered. A model that will
+// not describe the material returns prose, an empty body or an error, and all
+// three arrive as a review that does not parse -- indistinguishable here from
+// a mangled one, and not worth distinguishing, because the answer is the same:
+// ask somebody else. The batch suffix is dropped because these are the leftovers,
+// wanted now rather than at batch latency, and there are few enough to pay for.
+func (e *Engine) offerToFallbacks(ctx context.Context, jobs []ReviewJob, landed map[string]bool, land func(map[string]string, string) error) error {
+	for _, fallback := range e.Config.Enrich.ReviewFallback {
+		pending := []ReviewJob{}
+		for _, j := range jobs {
+			if !landed[j.ID] {
+				pending = append(pending, j)
+			}
+		}
+		if len(pending) == 0 {
+			return nil
+		}
+		fallback = strings.TrimSuffix(fallback, ":batch")
+		e.Say("%d review(s) unanswered; offering them to %s", len(pending), fallback)
+		results, errs := parallelMap(ctx, pending, max(1, e.Config.Enrich.Workers), func(ctx context.Context, j ReviewJob) (string, error) {
+			complete := startRunWork(ctx, "review retry "+j.ID)
+			text, _, err := e.API.Chat(ctx, fallback, j.Messages, TokenCeiling, .2)
+			complete(err)
+			return text, err
+		})
+		for i, text := range results {
+			if errs[i] != nil {
+				e.Say("FAIL review %s on %s: %v", pending[i].ID, fallback, errs[i])
+				continue
+			}
+			if err := land(map[string]string{pending[i].ID: text}, fallback); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, batchSize int, poll time.Duration, recover []string, wait bool) (int, error) {
 	model := e.Config.Enrich.ReviewModel
 	byID := map[string]ReviewJob{}
@@ -399,10 +489,13 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 	}
 	done := 0
 	landed := map[string]bool{}
-	land := func(results map[string]string) error {
+	// answered records which model actually produced the entry, which is not
+	// always the one first asked: a review offered to a fallback is still that
+	// fallback's work, and the library should say so.
+	land := func(results map[string]string, answered string) error {
 		for _, id := range sortedKeys(results) {
 			j, ok := byID[id]
-			if !ok {
+			if !ok || landed[id] {
 				continue
 			}
 			final, err := ExtractJSON(results[id])
@@ -410,7 +503,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 				e.Say("FAIL review %s: %v", id, err)
 				continue
 			}
-			if err = e.Store.Put(j.Key, Record{"final": final, "review_model": model, "sentences": j.Sentences}, j.Fingerprint, ""); err != nil {
+			if err = e.Store.Put(j.Key, Record{"final": final, "review_model": answered, "sentences": j.Sentences}, j.Fingerprint, ""); err != nil {
 				return err
 			}
 			landed[id] = true
@@ -432,7 +525,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 		if err != nil {
 			return done, err
 		}
-		if err = land(results); err != nil {
+		if err = land(results, model); err != nil {
 			return done, err
 		}
 		e.markBatch(id, "landed")
@@ -466,7 +559,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 				continue
 			}
 			e.Say("taking up batch %s, submitted earlier and never read", id)
-			if err = land(results); err != nil {
+			if err = land(results, model); err != nil {
 				return done, err
 			}
 			e.markBatch(id, "landed")
@@ -485,7 +578,7 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 				e.markBatch(id, "unreadable")
 				continue
 			}
-			if err = land(results); err != nil {
+			if err = land(results, model); err != nil {
 				return done, err
 			}
 			e.markBatch(id, "landed")
@@ -516,9 +609,12 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 				e.Say("FAIL review %s: %v", jobs[i].ID, errs[i])
 				continue
 			}
-			if err := land(map[string]string{jobs[i].ID: result}); err != nil {
+			if err := land(map[string]string{jobs[i].ID: result}, model); err != nil {
 				return done, err
 			}
+		}
+		if err := e.offerToFallbacks(ctx, jobs, landed, land); err != nil {
+			return done, err
 		}
 		if done != len(jobs) {
 			return done, fmt.Errorf("%d of %d reviews failed", len(jobs)-done, len(jobs))
@@ -577,14 +673,17 @@ func (e *Engine) RunReviews(ctx context.Context, jobs []ReviewJob, inFlight, bat
 			failures = append(failures, err.Error())
 			continue
 		}
-		if err = land(result.results); err != nil {
+		if err = land(result.results, model); err != nil {
 			return done, err
 		}
 		if result.id != "" {
 			e.markBatch(result.id, "landed")
 		}
 	}
-	if len(failures) > 0 {
+	if err := e.offerToFallbacks(ctx, jobs, landed, land); err != nil {
+		return done, err
+	}
+	if len(failures) > 0 && done != len(jobs) {
 		return done, fmt.Errorf("review batches: %s", strings.Join(failures, "; "))
 	}
 	if done != len(jobs) {
@@ -687,6 +786,10 @@ func (e *Engine) Emit(ctx context.Context, j Planned, covers, overwrite, redraw 
 	}
 	prov["fingerprint"] = fp
 	prov["source_record"] = filepath.Base(s.Path)
+	// Inductor says so of its own records, and says nothing of anyone else's.
+	// Ownership is claimed, never inferred: an entry written by hand carries no
+	// claim, so nothing here will ever remove it, whatever else is true of it.
+	prov[ManagedBy] = ManagedByInductor
 	claimed := str(prov["source_key"])
 	if claimed != "" && claimed != s.Audio {
 		a := uniqueStrings(append(texts(prov["merged_source_keys"]), s.Audio))
@@ -773,6 +876,16 @@ func (e *Engine) Emit(ctx context.Context, j Planned, covers, overwrite, redraw 
 	authorPath := filepath.Join(c.Content, s.AuthorID(), "_author.yaml")
 	return writeYAML(authorPath, Record{"apiVersion": "hypnotica/v1", "kind": "Author", "id": s.AuthorID(), "name": s.Author, "needs": []string{"summary", "description"}}, authorOrder)
 }
+
+// ManagedBy marks an entry as Inductor's own, so that removing the source
+// record it came from removes the entry too. Absence of the mark is a hard stop
+// on deletion -- a hand-written entry, or one older than the mark, is reported
+// and left alone.
+const (
+	ManagedBy         = "managed_by"
+	ManagedByInductor = "inductor"
+)
+
 func MarkGenerated(p Record, fields ...string) {
 	if len(fields) == 0 {
 		return

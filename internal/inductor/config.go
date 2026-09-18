@@ -18,17 +18,20 @@ type TranscribeSettings struct {
 	Workers   int    `yaml:"workers"`
 }
 type EnrichSettings struct {
-	AnalysisModel    string `yaml:"analysis_model"`
-	ReviewModel      string `yaml:"review_model"`
-	AdjudicatorModel string `yaml:"adjudicator_model"`
-	Workers          int    `yaml:"workers"`
-	BatchSize        int    `yaml:"batch_size"`
-	KeyFile          string `yaml:"key_file"`
-	ComfyURL         string `yaml:"comfy_url"`
-	Covers           bool   `yaml:"covers"`
-	CoverEngine      string `yaml:"cover_engine"`
-	CoverWidth       int    `yaml:"cover_width"`
-	CoverHeight      int    `yaml:"cover_height"`
+	AnalysisModel string `yaml:"analysis_model"`
+	ReviewModel   string `yaml:"review_model"`
+	// ReviewFallback names models to offer a review to when the first one will
+	// not answer. A refusal is a fact about the model, not about the recording.
+	ReviewFallback   []string `yaml:"review_fallback"`
+	AdjudicatorModel string   `yaml:"adjudicator_model"`
+	Workers          int      `yaml:"workers"`
+	BatchSize        int      `yaml:"batch_size"`
+	KeyFile          string   `yaml:"key_file"`
+	ComfyURL         string   `yaml:"comfy_url"`
+	Covers           bool     `yaml:"covers"`
+	CoverEngine      string   `yaml:"cover_engine"`
+	CoverWidth       int      `yaml:"cover_width"`
+	CoverHeight      int      `yaml:"cover_height"`
 }
 type MediaSettings struct {
 	Mode      string `yaml:"mode"`
@@ -42,7 +45,7 @@ type Config struct {
 }
 
 func LoadConfig(root string) (Config, error) {
-	c := Config{Root: absolute(root), Transcribe: TranscribeSettings{"distil-large-v3", "", "~/inductor-stt", 16, "en", 6}, Enrich: EnrichSettings{"deepseek/deepseek-v4-flash", "google/gemini-3.8-flash:batch", "anthropic/claude-opus-5", 12, 150, "", "", true, "turbo", 1024, 576}, MediaSettings: MediaSettings{"symlink", "if-needed"}}
+	c := Config{Root: absolute(root), Transcribe: TranscribeSettings{"distil-large-v3", "", "~/inductor-stt", 16, "en", 6}, Enrich: EnrichSettings{AnalysisModel: "deepseek/deepseek-v4-flash", ReviewModel: "google/gemini-3.8-flash:batch", ReviewFallback: []string{"z-ai/glm-5.3-flash"}, AdjudicatorModel: "anthropic/claude-opus-5", Workers: 12, BatchSize: 150, Covers: true, CoverEngine: "turbo", CoverWidth: 1024, CoverHeight: 576}, MediaSettings: MediaSettings{"symlink", "if-needed"}}
 	r := Record{}
 	for _, n := range []string{"inductor.yaml", "inductor.yml"} {
 		p := filepath.Join(c.Root, n)

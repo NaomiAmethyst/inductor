@@ -63,6 +63,58 @@ func TranscriptKey(text string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// Source records are parsed once per run, not once per caller.
+//
+// Decoding them is the most expensive thing a run does before it touches any
+// audio -- on a large library, nearly ten thousand records across a few hundred
+// files and better than twenty seconds of YAML -- and a full run asks for them
+// four or five times over, because the check, the plan, orphans and the tag
+// workflows each load them independently.
+//
+// The result is kept in memory rather than on disk on purpose: round-tripping
+// decoded YAML through JSON turns integers into floats and cannot carry a
+// non-string key, and quietly altering source records to save a few seconds is
+// a bad trade. Freshness is settled by re-stating the files, which costs
+// milliseconds, so an edit between two loads is still seen.
+type sourceMemo struct {
+	stamp  string
+	report SourceReport
+}
+
+var (
+	sourceMemos   = map[string]sourceMemo{}
+	sourceMemosMu sync.Mutex
+)
+
+// sourceStamp is size and mtime over every file that would be read. Cheap
+// enough to compute on each load, and exact enough that a changed, added or
+// removed record invalidates it.
+func sourceStamp(files []string) string {
+	h, _ := blake2b.New(16, nil)
+	for _, p := range files {
+		info, err := os.Stat(p)
+		if err != nil {
+			fmt.Fprintf(h, "%s\x00missing\x00", p)
+			continue
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00%d\x00", p, info.Size(), info.ModTime().UnixNano())
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func memoisedSources(root, stamp string) (SourceReport, bool) {
+	sourceMemosMu.Lock()
+	defer sourceMemosMu.Unlock()
+	m, ok := sourceMemos[root]
+	return m.report, ok && m.stamp == stamp
+}
+
+func memoiseSources(root, stamp string, r SourceReport) {
+	sourceMemosMu.Lock()
+	defer sourceMemosMu.Unlock()
+	sourceMemos[root] = sourceMemo{stamp: stamp, report: r}
+}
+
 // SoundnessCache remembers which audio decodes from end to end.
 //
 // A file can open, report a duration, and still be broken: a truncated
@@ -82,39 +134,106 @@ func NewSoundnessCache(path string) *SoundnessCache {
 	return &SoundnessCache{Path: path, entries: record(readJSON(path)["entries"])}
 }
 
-// Of returns what the decoder complained about, or "" if the file played
-// through clean. The error is for when the check itself could not be run.
-func (c *SoundnessCache) Of(ctx context.Context, path string) (string, error) {
+// Of decodes a file end to end and reports what the decoder said about it and
+// how much audio actually came out, as a fraction of what the file claims.
+//
+// The fraction is what separates the two kinds of damage. A recording with a
+// few malformed frame headers still yields every second of its audio -- the
+// decoder skips the bad frames and carries on -- and re-encoding it produces a
+// clean file with nothing lost. A truncated or gutted file yields a fraction of
+// what it promises, and transcoding that only launders the loss into a file
+// that looks healthy. The first is worth repairing; the second is not.
+func (c *SoundnessCache) Of(ctx context.Context, path string) (complaint string, recovered float64, err error) {
 	s, e := os.Stat(path)
 	if e != nil {
-		return "", e
+		return "", 0, e
 	}
 	key, ok := fileIdentity(path, s)
 	if ok {
 		c.mu.Lock()
-		row := array(c.entries[key])
-		if len(row) == 3 && str(row[0]) == fmt.Sprint(s.Size()) && str(row[1]) == fmt.Sprint(s.ModTime().UnixNano()) {
-			v := str(row[2])
+		row := record(c.entries[key])
+		if len(row) > 0 && str(row["size"]) == fmt.Sprint(s.Size()) &&
+			str(row["mtime"]) == fmt.Sprint(s.ModTime().UnixNano()) {
+			v, f := str(row["complaint"]), number(row["recovered"])
 			c.mu.Unlock()
-			return v, nil
+			return v, f, nil
 		}
 		c.mu.Unlock()
 	}
-	out, _ := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-i", path, "-f", "null", "-").CombinedOutput()
-	complaint := strings.TrimSpace(string(out))
+	complaint, recovered = decodeFully(ctx, path)
+	if ok {
+		c.mu.Lock()
+		c.entries[key] = Record{"size": s.Size(), "mtime": s.ModTime().UnixNano(),
+			"complaint": complaint, "recovered": recovered}
+		c.dirty = true
+		c.mu.Unlock()
+	}
+	return complaint, recovered, nil
+}
+
+// Peek answers only from what has already been decoded. Cheap predicates -- the
+// ones asked eight times a recording about whether an artefact exists -- must
+// never start a decode: doing so turned a two-second sweep of the library into
+// one that played every file in it from end to end.
+func (c *SoundnessCache) Peek(path string) (complaint string, recovered float64, known bool) {
+	s, e := os.Stat(path)
+	if e != nil {
+		return "", 0, false
+	}
+	key, ok := fileIdentity(path, s)
+	if !ok {
+		return "", 0, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	row := record(c.entries[key])
+	if len(row) == 0 || str(row["size"]) != fmt.Sprint(s.Size()) ||
+		str(row["mtime"]) != fmt.Sprint(s.ModTime().UnixNano()) {
+		return "", 0, false
+	}
+	return str(row["complaint"]), number(row["recovered"]), true
+}
+
+// decodeFully plays the whole file to nowhere, counting the samples that come
+// out and keeping the decoder's first complaint.
+func decodeFully(ctx context.Context, path string) (string, float64) {
+	const rate = 8000
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-v", "error", "-i", path,
+		"-f", "s16le", "-ac", "1", "-ar", fmt.Sprint(rate), "-")
+	var grumbles strings.Builder
+	cmd.Stderr = &grumbles
+	out, e := cmd.StdoutPipe()
+	if e != nil {
+		return e.Error(), 0
+	}
+	if e = cmd.Start(); e != nil {
+		return e.Error(), 0
+	}
+	bytesOut, buf := int64(0), make([]byte, 1<<16)
+	for {
+		n, readErr := out.Read(buf)
+		bytesOut += int64(n)
+		if readErr != nil {
+			break
+		}
+	}
+	_ = cmd.Wait()
+	complaint := strings.TrimSpace(grumbles.String())
 	if i := strings.IndexByte(complaint, '\n'); i > 0 {
 		complaint = complaint[:i]
 	}
 	if len(complaint) > 200 {
 		complaint = complaint[:200]
 	}
-	if ok {
-		c.mu.Lock()
-		c.entries[key] = []any{s.Size(), s.ModTime().UnixNano(), complaint}
-		c.dirty = true
-		c.mu.Unlock()
+	decoded := float64(bytesOut) / 2 / rate
+	declared := number(AudioMetadata(ctx, path)["duration"])
+	if declared <= 0 {
+		if decoded > 0 {
+			return complaint, 1
+		}
+		return complaint, 0
 	}
-	return complaint, nil
+	return complaint, decoded / declared
 }
 
 func (c *SoundnessCache) Save() error {
@@ -245,7 +364,7 @@ type ItemIndex struct {
 func NewItemIndex(path string) *ItemIndex {
 	r := readJSON(path)
 	rows := Record{}
-	if integer(r["version"]) == 6 {
+	if integer(r["version"]) == 7 {
 		rows = record(r["rows"])
 	}
 	return &ItemIndex{Path: path, rows: rows}
@@ -261,9 +380,12 @@ func ItemFacts(d Record, path string) Record {
 		r[f] = str(p[f])
 	}
 	r["merged_source_keys"] = texts(p["merged_source_keys"])
+	// Kept so building creators' tag maps can count from the index instead of
+	// re-reading every item document in the library for the same figures.
+	r["tags"] = texts(d["tags"])
 	return r
 }
-func (i *ItemIndex) Entries(root string) ([]Document, error) {
+func (i *ItemIndex) Entries(root string, watch ...func(done, total int)) ([]Document, error) {
 	if !exists(root) {
 		return nil, nil
 	}
@@ -273,7 +395,10 @@ func (i *ItemIndex) Entries(root string) ([]Document, error) {
 	}
 	seen := map[string]bool{}
 	out := []Document{}
-	for _, p := range files {
+	for n, p := range files {
+		for _, w := range watch {
+			w(n, len(files))
+		}
 		if strings.HasSuffix(p, ".transcript.yaml") || strings.HasSuffix(p, ".transcript.yml") {
 			continue
 		}
@@ -311,7 +436,7 @@ func (i *ItemIndex) Save() error {
 	if !i.dirty {
 		return nil
 	}
-	err := writeJSON(i.Path, Record{"apiVersion": "inductor/v1", "kind": "ItemIndex", "version": 6, "rows": i.rows})
+	err := writeJSON(i.Path, Record{"apiVersion": "inductor/v1", "kind": "ItemIndex", "version": 7, "rows": i.rows})
 	if err == nil {
 		i.dirty = false
 	}

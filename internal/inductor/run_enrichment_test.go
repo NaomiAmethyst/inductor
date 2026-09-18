@@ -293,7 +293,7 @@ func TestRunRepairsCoverPromptsAndArtworkAcrossExistingEntries(t *testing.T) {
 		t.Fatal("valid artwork was regenerated")
 	}
 	// A changed prompt makes otherwise correctly sized generated art stale.
-	StampArt(nested(item, "provenance"), "old prompt", "", "flux")
+	StampArt(nested(item, "provenance"), "old prompt", "", "flux", str(item["title"]))
 	putRecord(t, p, item)
 	run()
 	if renders.Load() != 2 {
@@ -370,5 +370,41 @@ func TestRunSelectsFinishedSourcesAndRefreshesEntries(t *testing.T) {
 	}
 	if exists(keyPath) {
 		t.Fatal("dry run migrated the legacy review cache")
+	}
+}
+
+// A cover that arrived beside its source keeps the extension it arrived with,
+// so the file on disk need not be <id>.png at all. The scheduler used to look
+// only for that one name while RenderCover decides by whether the item declares
+// a cover — so every run queued art for the mismatches and the renderer
+// declined every one of them in silence, on a lane one job wide. A predicate
+// and its producer have to answer the same question.
+func TestCoverIsSatisfiedByADeclaredCoverOfAnyExtension(t *testing.T) {
+	e, p := runFixture(t)
+	const fp = "declared-cover"
+	if err := writeJSON(filepath.Join(e.Config.Transcripts(), fp+".json"), Record{"text": "spoken"}); err != nil {
+		t.Fatal(err)
+	}
+	art := filepath.Join(e.Config.Covers, "creator", "one.jpg")
+	if err := os.MkdirAll(filepath.Dir(art), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(art, []byte("jpeg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	j := Planned{Source: &Source{Author: "creator", fingerprint: fp}, Stem: "one", Path: p}
+	item := Record{"kind": "Item", "id": "one", "title": "One", "author": "creator", "provenance": Record{"fingerprint": fp}}
+
+	putRecord(t, p, item)
+	if e.ArtifactExists("cover", j, nil, false) {
+		t.Fatal("an item declaring no cover, with no .png of its own, read as already drawn")
+	}
+	item["cover"] = "../../media/cover/creator/one.jpg"
+	putRecord(t, p, item)
+	if !e.ArtifactExists("cover", j, nil, false) {
+		t.Fatal("a declared .jpg cover read as missing, so every run redraws art the renderer refuses to draw")
+	}
+	if e.ArtifactExists("cover", j, []string{"cover"}, false) {
+		t.Fatal("--redo cover no longer forces a redraw")
 	}
 }

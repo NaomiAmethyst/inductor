@@ -73,8 +73,12 @@ func TestRunMaintainsIdleLibraryAndAppliesTagmapRulings(t *testing.T) {
 	if row := record(LoadMapping(c, "creator")["calming"]); str(row["to"]) != "Calm" {
 		t.Fatal("mapping was not settled", row)
 	}
-	if !exists(emptyAuthor) || !exists(strayTranscript) || len(texts(record(report["orphans"])["empty_authors"])) != 1 {
-		t.Fatal("orphans should be reported and retained", report)
+	// A run now sweeps as well as reports: a creator page no item names and a
+	// transcript pointing at no item are both gone. Items are the careful case
+	// and are covered separately -- only Inductor's own, only when the source
+	// record is gone.
+	if exists(emptyAuthor) || exists(strayTranscript) || len(texts(record(report["orphans"])["empty_authors"])) != 1 {
+		t.Fatal("orphans should be reported and removed", report)
 	}
 	if _, err := dispatchRun(t, e); err != nil || calls.Load() != 2 {
 		t.Fatal("a completed run should be resumable without more API calls", err, calls.Load())
@@ -301,5 +305,30 @@ func TestRunCheckForceAndPostflightAfterFailure(t *testing.T) {
 	report, err = dispatchRun(t, e, "--no-adjudicate")
 	if err == nil || !strings.Contains(err.Error(), "artefact") || report["orphans"] == nil || report["voiceprint_verify"] == nil {
 		t.Fatal("graph failure prevented diagnostic reports", report, err)
+	}
+}
+
+// The sweep is what a plain run does; --no-orphans-write asks for the report
+// without the removal, and a dry run never removes whatever the flags say.
+func TestRunKeepsOrphansWhenAskedAndOnDryRuns(t *testing.T) {
+	for _, flag := range []string{"--no-orphans-write", "--dry-run"} {
+		t.Run(flag, func(t *testing.T) {
+			e, _ := runFixture(t)
+			c := e.Config
+			emptyAuthor := filepath.Join(c.Content, "unused", "author.yaml")
+			strayTranscript := filepath.Join(c.Content, "stray.transcript.yaml")
+			putRecord(t, emptyAuthor, Record{"kind": "Author", "id": "unused", "name": "Unused"})
+			putRecord(t, strayTranscript, Record{"kind": "Transcript", "item": "missing", "text": "stray"})
+			report, err := dispatchRun(t, e, "--no-adjudicate", "--no-tagmaps", flag)
+			if err != nil {
+				t.Fatal(report, err)
+			}
+			if !exists(emptyAuthor) || !exists(strayTranscript) {
+				t.Fatalf("%s still removed the orphans", flag)
+			}
+			if len(texts(record(report["orphans"])["empty_authors"])) != 1 {
+				t.Fatalf("%s stopped them being reported", flag)
+			}
+		})
 	}
 }

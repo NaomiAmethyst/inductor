@@ -38,7 +38,7 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, co
 	}
 	planned := startRunWork(ctx, "planning recordings")
 	defer func() { planned(commandErr) }()
-	r, err := LoadSources(c.Sources)
+	r, err := e.loadSources()
 	if err != nil {
 		if a.String("only") == "" {
 			return nil, err
@@ -72,7 +72,27 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, co
 	if a.Command == "run" {
 		planLimit = 0
 	}
-	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{Authors: a.Strings("author"), Limit: planLimit, Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
+	indexed := 0
+	readIndexRaw, doneIndex := startLoading(e.Out, e.Colour, e.Say, "reading the item index")
+	readIndex := func(n, total int) { indexed = total; readIndexRaw(n, total) }
+	matchSources, doneMatching := startLoading(e.Out, e.Colour, e.Say, "placing sources")
+	chosen, err := PlanSources(c, r, e.Index, e.Fingerprints, PlanOptions{
+		Watch: []func(int, int){readIndex}, Match: []func(int, int){func(n, total int) {
+			if n == 0 {
+				// Matching has begun, so the index is read. Closing it here
+				// rather than on every source, which printed its summary 9,824
+				// times before finish learned to say things once.
+				doneIndex(indexed)
+			}
+			matchSources(n, total)
+		}},
+		Stop: ctx.Err, Authors: a.Strings("author"), Limit: planLimit, Needs: a.Strings("needs"), Redo: redo, Fresh: a.Bool("new"), Only: only})
+	doneIndex(0)
+	doneMatching(len(chosen))
+	// Planning is over the moment it returns, whatever the command does next.
+	// Left to the deferred call this label stayed in flight for the whole run,
+	// so a heartbeat an hour in still said "planning recordings".
+	planned(err)
 	if err != nil {
 		return nil, err
 	}
@@ -107,12 +127,29 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, co
 		}
 	}
 	if a.Command == "run" {
+		// Read once for the whole sweep, not once per recording.
+		reg, regErr := LoadRegistry(c.RegistryPath())
+		if regErr != nil {
+			reg = nil
+		}
+		maps := map[string]Record{}
+		sift, doneSifting := startLoading(e.Out, e.Colour, e.Say, "checking what each recording still needs")
 		pending := []Planned{}
-		for _, j := range chosen {
-			if only != nil || len(a.Strings("redo")) > 0 || a.Bool("overwrite") || e.runJobOutstanding(j, a) {
+		for n, j := range chosen {
+			// Ctrl+C is answered here, not after the sweep. Cancellation only
+			// takes effect where something looks for it, and a loop over every
+			// recording in the library is long enough to feel ignored.
+			if ctx.Err() != nil {
+				doneSifting(len(pending))
+				planned(ctx.Err())
+				return counts, ctx.Err()
+			}
+			sift(n, len(chosen))
+			if only != nil || len(a.Strings("redo")) > 0 || a.Bool("overwrite") || e.runJobOutstanding(j, a, reg, maps) {
 				pending = append(pending, j)
 			}
 		}
+		doneSifting(len(pending))
 		chosen = pending
 		if n := a.Int("limit"); n > 0 {
 			chosen = chosen[:min(n, len(chosen))]
@@ -158,7 +195,7 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, co
 			var err error
 			switch stage {
 			case "media":
-				_, err = PlaceMedia(ctx, c, j.Source, j.Stem)
+				_, err = PlaceMedia(ctx, c, j.Source, j.Stem, false)
 			case "transcribe":
 				err = e.Transcribe(ctx, j, false, false)
 			case "analyse":
@@ -312,10 +349,15 @@ func (e *Engine) transcribeCommand(ctx context.Context, a Arguments) (Record, er
 			if p == nil {
 				continue
 			}
-			complete := startRunWork(ctx, "audit transcript "+j.Source.AuthorID()+"/"+j.Stem)
-			meta := AudioMetadata(ctx, j.Source.AudioPath(e.Config.Sources))
-			complete(ctx.Err())
-			length := number(meta["duration"])
+			// The duration is already recorded, on the source or on the
+			// transcript. Asking ffprobe again -- once per recording, in turn --
+			// was the whole cost of this pass.
+			length := number(first(j.Source.Data["duration"], p["duration"]))
+			if length == 0 {
+				complete := startRunWork(ctx, "audit transcript "+j.Source.AuthorID()+"/"+j.Stem)
+				length = number(AudioMetadata(ctx, j.Source.AudioPath(e.Config.Sources))["duration"])
+				complete(ctx.Err())
+			}
 			covered := number(p["covered"])
 			if p["covered"] == nil {
 				segments := array(p["segments"])

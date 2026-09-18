@@ -178,3 +178,140 @@ func TestRunProgressFlagsReachMaintenance(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadingReportsOnATerminalAndInALog(t *testing.T) {
+	// On a terminal: one line, repainted in place, never scrolling.
+	var screen bytes.Buffer
+	step, finish := startLoading(&screen, true, func(string, ...any) { t.Error("a terminal should be repainted, not logged to") }, "loading source records")
+	time.Sleep(loadingFloor + 20*time.Millisecond)
+	for i := 0; i < 5; i++ {
+		step(i, 5)
+		time.Sleep(spinnerPaint)
+	}
+	painted := screen.String()
+	if !strings.Contains(painted, "loading source records: ") || !strings.Contains(painted, "\r") {
+		t.Fatalf("no spinner painted: %q", painted)
+	}
+	if strings.Contains(painted, "\n") {
+		t.Fatalf("the spinner scrolled the terminal: %q", painted)
+	}
+	var said []string
+
+	// Without a terminal: occasional lines, and nothing written to the stream.
+	var stream bytes.Buffer
+	step, finish = startLoading(&stream, false, func(f string, v ...any) { said = append(said, fmt.Sprintf(f, v...)) }, "loading source records")
+	time.Sleep(loadingFloor + 20*time.Millisecond)
+	step(1, 9824)
+	finish(9824)
+	if stream.Len() != 0 {
+		t.Fatalf("escape codes reached a non-terminal: %q", stream.String())
+	}
+	if len(said) == 0 || !strings.Contains(said[len(said)-1], "9824") {
+		t.Fatalf("no summary logged: %v", said)
+	}
+}
+
+func TestAQuickLoadSaysNothing(t *testing.T) {
+	var screen bytes.Buffer
+	var said []string
+	step, finish := startLoading(&screen, true, func(f string, v ...any) { said = append(said, fmt.Sprintf(f, v...)) }, "loading source records")
+	step(1, 2)
+	finish(2)
+	if screen.Len() != 0 || len(said) != 0 {
+		t.Fatalf("a fast phase should pass in silence: %q %v", screen.String(), said)
+	}
+}
+
+func TestTheTerminalGetsALineAndAPathWhilePipesGetEverything(t *testing.T) {
+	full := Record{
+		"recordings": 517,
+		"check":      map[string]any{"errors": []any{}, "warnings": []any{"a", "b", "c"}, "sources": 9824},
+		"duplicates": map[string]any{"merges": []any{}, "different creators": 0},
+		"adjudicate": map[string]any{"application": map[string]any{"tagged": 6}},
+		"report":     "/cache/runs/run-x.json",
+	}
+	shown := forReading(full)
+
+	// A finding becomes a line; the path to the whole of it stays.
+	if s, ok := shown["check"].(string); !ok || !strings.Contains(s, "3 warnings") || !strings.Contains(s, "9824 sources") {
+		t.Fatalf("check was not reduced to a line: %#v", shown["check"])
+	}
+	if s, ok := shown["duplicates"].(string); !ok || s != "nothing to report" {
+		t.Fatalf("an empty finding should say so plainly: %#v", shown["duplicates"])
+	}
+	if shown["report"] != "/cache/runs/run-x.json" {
+		t.Fatal("the path to the findings was dropped")
+	}
+	// What the run *did* is the result, not a finding about it, so it stays whole.
+	if _, ok := shown["adjudicate"].(map[string]any); !ok {
+		t.Fatalf("a phase that changed things was flattened: %#v", shown["adjudicate"])
+	}
+	if shown["recordings"] != 517 {
+		t.Fatal("unrelated keys were disturbed")
+	}
+
+	// The report other things read must be untouched by how it was displayed.
+	if _, ok := full["check"].(map[string]any); !ok {
+		t.Fatal("trimming for a terminal mutated the machine-readable report")
+	}
+
+	// With nothing filed there is nothing to point at, so nothing is trimmed.
+	plain := Record{"check": map[string]any{"warnings": []any{"a"}}}
+	if _, ok := forReading(plain)["check"].(map[string]any); !ok {
+		t.Fatal("a report with no filed findings should be left alone")
+	}
+}
+
+// A pass that is still running used to print the word "running" and nothing
+// else, so a heartbeat could not tell work in progress from work wedged. The
+// work it dispatches is already tracked; it just was not attributed to the pass
+// that asked for it.
+func TestARunningPhaseReportsTheWorkItHasInFlight(t *testing.T) {
+	lines := make(chan string, 16)
+	ctx, stop := startRunProgress(context.Background(), func(f string, args ...any) {
+		lines <- fmt.Sprintf(f, args...)
+	}, true, false, false)
+	defer stop()
+	p := progressFrom(ctx)
+	ticks := make(chan time.Time)
+	watchCtx, cancel := context.WithCancel(ctx)
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); p.watch(watchCtx, ticks) }()
+	defer func() { cancel(); <-stopped }()
+
+	updatePhaseProgress(ctx, []phaseTally{
+		{Name: "pages", State: "running"},
+		{Name: "backfill", State: "waiting"},
+	})
+	// Work dispatched by the pass, as its own goroutine would start it.
+	inside := withPhase(ctx, "pages")
+	defer startRunWork(inside, "author prompts 1-8/44")(nil)
+	defer startRunWork(inside, "author prompts 9-16/44")(nil)
+	// And work belonging to no pass, which must not be attributed to one.
+	defer startRunWork(ctx, "unrelated")(nil)
+
+	ticks <- time.Now()
+	var got []string
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case line := <-lines:
+			got = append(got, line)
+			if strings.Contains(line, "pages") {
+				report := line
+				if !strings.Contains(report, "2 in flight") {
+					t.Fatalf("a running pass did not say what it was doing: %q", report)
+				}
+				if !strings.Contains(report, "author prompts 1-8/44") {
+					t.Fatalf("a running pass did not name its work: %q", report)
+				}
+				if strings.Contains(report, "unrelated") {
+					t.Fatalf("work belonging to no pass was credited to one: %q", report)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatalf("no row for the running pass in:\n%s", strings.Join(got, "\n"))
+		}
+	}
+}

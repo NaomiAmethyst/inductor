@@ -47,16 +47,26 @@ type SourceReport struct {
 	Errors, Warnings []string
 }
 
-func LoadSources(root string) (SourceReport, error) {
+func LoadSources(root string, watch ...func(done, total int)) (SourceReport, error) {
 	r := SourceReport{}
 	files, e := yamlFiles(root, true)
 	if e != nil {
 		return r, e
 	}
+	// The several callers in one run share the parse, and the Sources with it:
+	// the resolved path and fingerprint a Source remembers are caches too, so
+	// passing the same ones along is the point rather than a hazard.
+	stamp := sourceStamp(files)
+	if cached, ok := memoisedSources(root, stamp); ok {
+		return cached, nil
+	}
 	seen := map[string]string{}
 	titles := map[string]map[string]int{}
 	known := pythonFields("apiVersion kind audio title author author_id date description summary tags categories series series_index source_url cover explicit variant provenance duration")
-	for _, p := range files {
+	for n, p := range files {
+		for _, w := range watch {
+			w(n, len(files))
+		}
 		b, e := os.ReadFile(p)
 		if e != nil {
 			return r, e
@@ -118,16 +128,27 @@ func LoadSources(root string) (SourceReport, error) {
 				if titles[s.AuthorID()] == nil {
 					titles[s.AuthorID()] = map[string]int{}
 				}
-				titles[s.AuthorID()][s.Title]++
+				// Counted per title *and* variant. A variant group shares a
+				// title by design -- that is what makes it a group -- so the
+				// repeat worth reporting is two records claiming the same
+				// title under the same distinguisher, which is a duplicate
+				// import rather than an edition.
+				titles[s.AuthorID()][s.Title+"\x00"+strings.TrimSpace(str(d["variant"]))]++
 			}
 		}
 	}
 	for _, a := range sortedKeys(titles) {
 		for _, t := range sortedKeys(titles[a]) {
 			if titles[a][t] > 1 {
-				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: repeated title %q", a, t))
+				title, variant, _ := strings.Cut(t, "\x00")
+				if variant != "" {
+					r.Warnings = append(r.Warnings, fmt.Sprintf("%s: repeated title %q under the same variant %q", a, title, variant))
+					continue
+				}
+				r.Warnings = append(r.Warnings, fmt.Sprintf("%s: repeated title %q", a, title))
 			}
 		}
 	}
+	memoiseSources(root, stamp, r)
 	return r, nil
 }

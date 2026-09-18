@@ -269,12 +269,20 @@ func VideoTarget(c Config, s *Source, stem string) string {
 	}
 	return filepath.Join(c.Media, "video", s.AuthorID(), stem+ext)
 }
-func PlaceMedia(ctx context.Context, c Config, s *Source, stem string) (string, error) {
+
+// PlaceMedia puts a recording where the site can serve it. With repair set it
+// re-encodes rather than links, which is the only thing that clears malformed
+// frames: remuxing copies them through untouched, and a strict decoder -- the
+// one faster_whisper uses -- refuses the file either way.
+func PlaceMedia(ctx context.Context, c Config, s *Source, stem string, repair bool) (string, error) {
 	src := s.AudioPath(c.Sources)
 	if src == "" {
 		return "", fmt.Errorf("audio not found: %s", s.Audio)
 	}
 	work := NeedsWork(ctx, src, c.MediaSettings.Transcode)
+	if repair && work == "none" && c.MediaSettings.Transcode != "never" {
+		work = "transcode"
+	}
 	target := filepath.Join(c.Media, "audio", s.AuthorID(), stem+ServedAs(ctx, src))
 	if work == "demux" {
 		if v := VideoTarget(c, s, stem); v != "" {

@@ -402,7 +402,7 @@
           "--no-orphans"
         ],
         "action": "store_true",
-        "help": "skip the final library-wide orphan report (run never deletes orphans)"
+        "help": "skip the final library-wide orphan sweep entirely"
       },
       {
         "names": [
@@ -532,6 +532,20 @@
           "--resume"
         ],
         "help": "pick up an interrupted run by its resume point id"
+      },
+      {
+        "names": [
+          "--full-report"
+        ],
+        "action": "store_true",
+        "help": "print every finding in full, as when the output is not a terminal"
+      },
+      {
+        "names": [
+          "--no-orphans-write"
+        ],
+        "action": "store_true",
+        "help": "report orphans instead of removing them"
       }
     ]
   },
@@ -590,7 +604,7 @@
           "--write"
         ],
         "action": "store_true",
-        "help": "remove the creator pages and transcripts nothing refers to"
+        "help": "remove what nothing refers to: Inductor's own items whose source record is gone (never an unclaimed one), their transcripts, creator pages no item names, and stray transcripts"
       }
     ]
   },
@@ -714,6 +728,26 @@
           "--model"
         ],
         "help": "override the configured cheap model"
+      },
+      {
+        "names": [
+          "--apply"
+        ],
+        "help": "apply a TitleRulings file instead of asking a model"
+      },
+      {
+        "names": [
+          "--no-series"
+        ],
+        "action": "store_true",
+        "help": "with --apply: skip the series rulings"
+      },
+      {
+        "names": [
+          "--no-variants"
+        ],
+        "action": "store_true",
+        "help": "with --apply: skip the variant rulings"
       }
     ]
   },

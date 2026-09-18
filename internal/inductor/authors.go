@@ -247,7 +247,7 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 				// Two ways to know the picture is behind: the words we just
 				// wrote differ from the words on the page, or the stamp says
 				// the picture was drawn from something else again.
-				stale := restated || ArtStale(record(j.Doc.Data["provenance"]), text, "", engine)
+				stale := restated || ArtStale(record(j.Doc.Data["provenance"]), text, "", engine, str(first(j.Doc.Data["name"], j.Doc.Data["id"])))
 				if o.Render && (o.Redo || stale || !truth(j.Doc.Data["image"])) && o.Write {
 					dest := filepath.Join(e.Config.Covers, str(j.Doc.Data["id"]), "_author.png")
 					if o.Redo || stale || !exists(dest) {
@@ -264,7 +264,7 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 						if _, err = DrawNameplate(dest, str(first(j.Doc.Data["name"], j.Doc.Data["id"])), str(p["font"]), false); err != nil {
 							return report, err
 						}
-						StampArt(nested(j.Doc.Data, "provenance"), text, "", engine)
+						StampArt(nested(j.Doc.Data, "provenance"), text, "", engine, str(first(j.Doc.Data["name"], j.Doc.Data["id"])))
 					}
 					j.Doc.Data["image"] = e.Config.Portable(dest, filepath.Dir(j.Doc.Path))
 					MarkGenerated(nested(j.Doc.Data, "provenance"), "image")
@@ -375,7 +375,7 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		// through every run of this command untouched, each one a warning in the
 		// build and a missing picture on the site.
 		negative := str(record(d.Data["cover_prompts"])["negative"])
-		if redo || !truth(d.Data["cover"]) || w == 0 || w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight || ArtStale(record(d.Data["provenance"]), p, negative, e.Config.Enrich.CoverEngine) {
+		if redo || !truth(d.Data["cover"]) || w == 0 || w != e.Config.Enrich.CoverWidth || h != e.Config.Enrich.CoverHeight || ArtStale(record(d.Data["provenance"]), p, negative, e.Config.Enrich.CoverEngine, str(d.Data["title"])) {
 			rows = append(rows, d)
 		}
 	}
@@ -405,7 +405,7 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		}
 		// The picture changed even though its path did not, so the document has
 		// to be written back for the stamp to survive the run.
-		StampArt(nested(d.Data, "provenance"), p, negative, engine)
+		StampArt(nested(d.Data, "provenance"), p, negative, engine, str(d.Data["title"]))
 		MarkGenerated(nested(d.Data, "provenance"), "cover")
 		d.Data["cover"] = e.Config.Portable(dest, filepath.Dir(d.Path))
 		_, err = SaveDocument(d.Path, d.Data)
