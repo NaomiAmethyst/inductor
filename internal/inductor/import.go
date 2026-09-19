@@ -198,6 +198,72 @@ func (e *Engine) Add(ctx context.Context, o AddOptions) (Record, error) {
 	}
 	return report, nil
 }
+
+// SoundApply writes what a recording sounds like onto the items themselves.
+//
+// The measurements live in the cache keyed by fingerprint, which is the right
+// place for them and the wrong place for anything that renders the library: the
+// site reads content and nothing else. This is the same arrangement as the
+// acoustics, for the same reason.
+func (e *Engine) SoundApply(dry bool) (Record, error) {
+	docs, err := Documents(e.Config.Content, "item")
+	if err != nil {
+		return nil, err
+	}
+	cfg := e.Config.Transcribe.Sound
+	report := Record{"written": 0, "wordless": 0, "missing": 0}
+	for _, d := range docs {
+		fp := str(record(d.Data["provenance"])["fingerprint"])
+		heard := e.Sounds.Get(fp)
+		if len(heard) == 0 {
+			report["missing"] = integer(report["missing"]) + 1
+			continue
+		}
+		block := Record{}
+		for _, k := range []string{"voice_confidence", "fits", "tagger_model", "zeroshot_model"} {
+			if heard[k] != nil {
+				block[k] = heard[k]
+			}
+		}
+		// The tone measurements are only carried where they describe something.
+		// On a spoken recording they describe the speaker's pitch wandering,
+		// which is not a property of the recording anybody wants reported as one.
+		if t := record(heard["tones"]); len(t) > 0 {
+			if line := ToneSentence(t); line != "" {
+				block["tones"] = t
+				block["reads_as"] = line
+			}
+		}
+		if v := Labelled(heard, "sounds", 4); len(v) > 0 {
+			block["sounds"] = v
+		}
+		if v := Labelled(heard, "tags", 6); len(v) > 0 {
+			block["classes"] = v
+		}
+		// The transcript's verdict and the tagger's are kept separately because
+		// they are reached by different instruments and can disagree -- which is
+		// itself worth seeing rather than resolving away.
+		if p := e.transcript(fp); truth(p["speech"]) {
+			block["speech"] = str(p["speech"])
+		}
+		if truth(heard["voice_confidence"]) && number(heard["voice_confidence"]) < cfg.Threshold {
+			block["wordless"] = true
+			report["wordless"] = integer(report["wordless"]) + 1
+		}
+		if len(block) == 0 || equivalent(d.Data["sound"], block) {
+			continue
+		}
+		d.Data["sound"] = block
+		report["written"] = integer(report["written"]) + 1
+		if !dry {
+			if _, err = SaveDocument(d.Path, d.Data); err != nil {
+				return report, err
+			}
+		}
+	}
+	return report, nil
+}
+
 func (e *Engine) AcousticApply(dry bool) (Record, error) {
 	docs, err := Documents(e.Config.Content, "item")
 	if err != nil {

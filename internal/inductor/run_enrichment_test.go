@@ -293,7 +293,7 @@ func TestRunRepairsCoverPromptsAndArtworkAcrossExistingEntries(t *testing.T) {
 		t.Fatal("valid artwork was regenerated")
 	}
 	// A changed prompt makes otherwise correctly sized generated art stale.
-	StampArt(nested(item, "provenance"), "old prompt", "", "flux", str(item["title"]))
+	StampArt(nested(item, "provenance"), "old prompt", "", "flux", str(item["title"]), "heavy-sans")
 	putRecord(t, p, item)
 	run()
 	if renders.Load() != 2 {

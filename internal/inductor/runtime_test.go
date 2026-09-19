@@ -117,20 +117,20 @@ func TestGPUQueueCollectionIsAtomicAndFailuresArrive(t *testing.T) {
 	}
 	audio := filepath.Join(c.Root, "a.mp3")
 	putFile(t, audio, []byte("audio"))
-	if err := box.Enqueue(context.Background(), "transcribe-a", "transcribe", audio); err != nil {
+	if err := box.Enqueue(context.Background(), "transcribe-a", "transcribe", audio, nil); err != nil {
 		t.Fatal(err)
 	}
 	if !exists(filepath.Join(box.Directory, "jobs", "transcribe-a.json")) {
 		t.Fatal("job not queued")
 	}
-	if err := box.Enqueue(context.Background(), "../escape", "transcribe", audio); err == nil {
+	if err := box.Enqueue(context.Background(), "../escape", "transcribe", audio, nil); err == nil {
 		t.Fatal("unsafe job accepted")
 	}
 	if err := writeJSON(filepath.Join(box.Directory, "out", "transcribe-a.json"), Record{"id": "transcribe-a", "kind": "transcribe", "ok": false, "error": "bad audio"}); err != nil {
 		t.Fatal(err)
 	}
 	landing := filepath.Join(c.Cache, "landing")
-	_, err := box.Work(context.Background(), "transcribe-a", "transcribe", audio, landing)
+	_, err := box.Work(context.Background(), "transcribe-a", "transcribe", audio, landing, nil)
 	if err == nil || !strings.Contains(err.Error(), "bad audio") {
 		t.Fatal("failure lost", err)
 	}
@@ -199,7 +199,7 @@ func TestEmbeddingDependenciesWaitForAnEmbeddingJob(t *testing.T) {
 		Record{"id": "t", "kind": "transcribe", "ok": true, "result": Record{"text": "hi"}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := box.Work(context.Background(), "t", "transcribe", audio, landing); err != nil {
+	if _, err := box.Work(context.Background(), "t", "transcribe", audio, landing, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(asked) != 0 {
@@ -209,7 +209,7 @@ func TestEmbeddingDependenciesWaitForAnEmbeddingJob(t *testing.T) {
 		Record{"id": "e", "kind": "embed", "ok": true, "result": Record{"vector": []any{1}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := box.Work(context.Background(), "e", "embed", audio, landing); err != nil {
+	if _, err := box.Work(context.Background(), "e", "embed", audio, landing, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(asked) != 1 || !strings.Contains(asked[0], "speechbrain") {

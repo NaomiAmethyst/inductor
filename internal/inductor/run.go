@@ -127,6 +127,10 @@ func (e *Engine) runSelected(ctx context.Context, a Arguments, jobs []Planned, c
 		{name: "acoustic_apply", lane: "items", after: []string{"recordings"},
 			when: !a.Bool("no_acoustic_apply"),
 			run:  func(ctx context.Context) (Record, error) { return e.AcousticApply(dry) }},
+		// Same lane and the same reason: whole documents, saved back whole.
+		{name: "sound_apply", lane: "items", after: []string{"recordings"},
+			when: !a.Bool("no_sound_apply"),
+			run:  func(ctx context.Context) (Record, error) { return e.SoundApply(dry) }},
 
 		// Ruling waits for every analysis, not for the audits: how many
 		// recordings want a tag is the evidence, and that count is still

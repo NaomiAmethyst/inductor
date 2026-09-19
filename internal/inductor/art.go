@@ -11,6 +11,7 @@ import (
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/gofont/gobold"
 	"golang.org/x/image/font/opentype"
+	"golang.org/x/image/font/sfnt"
 	"golang.org/x/image/math/fixed"
 	"image"
 	"image/color"
@@ -26,13 +27,27 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var Fonts = map[string][2]string{"heavy-sans": {"/usr/share/fonts/truetype/lato/Lato-Black.ttf", "heavy grotesque; blunt, modern, loud"}, "condensed": {"/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyreheroscn-bold.otf", "tall condensed sans; urgent, editorial, tight"}, "geometric": {"/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyreadventor-bold.otf", "geometric sans; clean circles, retro-futurist, clinical"}, "script": {"/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyrechorus-mediumitalic.otf", "flowing chancery script; intimate, handwritten, romantic"}, "elegant-serif": {"/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyrepagella-bold.otf", "refined humanist serif; poised, classical, expensive"}, "bookish": {"/usr/share/texmf/fonts/opentype/public/tex-gyre/texgyrebonum-bold.otf", "warm old-style serif; storybook, solid, friendly"}}
 
+// FontOrder is the order faces are offered in, and the order a nameplate falls
+// back through. heavy-sans is last because it is the TrueType one: the least
+// characterful and the least likely to meet a glyph Go cannot draw.
+var FontOrder = []string{"condensed", "geometric", "script", "elegant-serif", "bookish", "heavy-sans"}
+
+// FontChoices is the menu offered when something is asked to pick a face.
+//
+// elegant-serif is deliberately absent while remaining in Fonts. The file it
+// names cannot be rasterised here -- most of its lowercase draws as nothing --
+// so anything set in it silently falls back to bookish. Keeping it in the map
+// means the pages that already chose it still resolve to a serif rather than
+// dropping to the default grotesque; keeping it off the menu means nothing new
+// chooses a face it will not get.
 func FontChoices() string {
 	lines := []string{}
-	for _, name := range []string{"heavy-sans", "condensed", "geometric", "script", "elegant-serif", "bookish"} {
+	for _, name := range []string{"heavy-sans", "condensed", "geometric", "script", "bookish"} {
 		lines = append(lines, "  "+name+" -- "+Fonts[name][1])
 	}
 	return strings.Join(lines, "\n")
@@ -52,8 +67,139 @@ func wrapWords(words []string, lines int) []string {
 	}
 	return out
 }
+
+// renderable reports whether a face can actually draw every character it is
+// given.
+//
+// A font can hand back a glyph index and a sensible advance width for a
+// character and still rasterise nothing at all. Go's support for
+// PostScript-flavoured OpenType does not cover every construct such a font may
+// use, and when it meets one it produces an empty outline and reports no error.
+// What comes out is a nameplate with letters silently missing -- one creator's
+// name set as "CesS", another's as "Ct" -- while every function involved returns
+// success. The advance is still correct, so the remaining letters are spaced as
+// though the missing ones were there, which is why it reads as a word rather
+// than as damage.
+//
+// An empty bounding box on a character that claims a non-zero advance is the
+// tell, and it costs one measurement per character to ask.
+func renderable(face font.Face, text string) bool {
+	for _, r := range text {
+		if unicode.IsSpace(r) {
+			continue
+		}
+		bounds, advance, ok := face.GlyphBounds(r)
+		if !ok || advance == 0 {
+			return false
+		}
+		if bounds.Max.X <= bounds.Min.X || bounds.Max.Y <= bounds.Min.Y {
+			return false
+		}
+	}
+	return true
+}
+
+// ChosenFace names the face a nameplate would actually be set in, which is the
+// one asked for unless it cannot draw the text.
+func ChosenFace(faceName, text string) string {
+	want := strings.ToLower(faceName)
+	at := 0
+	for i, n := range FontOrder {
+		if n == want {
+			at = i
+		}
+	}
+	names := []string{want}
+	for i := 1; i <= len(FontOrder); i++ {
+		if n := FontOrder[(at+i)%len(FontOrder)]; n != want {
+			names = append(names, n)
+		}
+	}
+	for _, name := range names {
+		entry, ok := Fonts[name]
+		if !ok {
+			continue
+		}
+		data, e := os.ReadFile(entry[0])
+		if e != nil {
+			continue
+		}
+		parsed, e := opentype.Parse(data)
+		if e != nil {
+			continue
+		}
+		probe, e := opentype.NewFace(parsed, &opentype.FaceOptions{Size: 64, DPI: 72, Hinting: font.HintingFull})
+		if e != nil {
+			continue
+		}
+		fits := renderable(probe, text)
+		_ = probe.Close()
+		if fits {
+			return name
+		}
+	}
+	return ""
+}
+
+// faceFor returns the first font that can draw this text: the one asked for
+// where it can, and otherwise the next that can. Falling back per nameplate
+// rather than dropping the font entirely is deliberate -- the fault is in
+// particular glyphs, and a face that cannot set one name sets most others
+// perfectly well.
+func faceFor(faceName, text string) (*sfnt.Font, error) {
+	// Start at the face that was asked for and walk on from there, wrapping.
+	// FontOrder groups the sans faces and the serif faces together, so the
+	// substitute for a serif is the other serif rather than whatever happens to
+	// be first: a nameplate that changes weight is a small loss, one that
+	// changes from a serif to a grotesque is a visible one.
+	want := strings.ToLower(faceName)
+	at := 0
+	for i, n := range FontOrder {
+		if n == want {
+			at = i
+		}
+	}
+	names := []string{want}
+	for i := 1; i <= len(FontOrder); i++ {
+		if n := FontOrder[(at+i)%len(FontOrder)]; n != want {
+			names = append(names, n)
+		}
+	}
+	var fallback *sfnt.Font
+	for _, name := range names {
+		entry, ok := Fonts[name]
+		if !ok {
+			continue
+		}
+		data, e := os.ReadFile(entry[0])
+		if e != nil {
+			continue
+		}
+		parsed, e := opentype.Parse(data)
+		if e != nil {
+			continue
+		}
+		if fallback == nil {
+			fallback = parsed
+		}
+		probe, e := opentype.NewFace(parsed, &opentype.FaceOptions{Size: 64, DPI: 72, Hinting: font.HintingFull})
+		if e != nil {
+			continue
+		}
+		fits := renderable(probe, text)
+		_ = probe.Close()
+		if fits {
+			return parsed, nil
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
+	}
+	return opentype.Parse(gobold.TTF)
+}
+
 func DrawNameplate(path, text, faceName string, title bool) (bool, error) {
-	text = strings.Join(pythonFields(text), " ")
+	text = strings.Join(pythonFields(StripControls(text)), " ")
 	if text == "" {
 		return false, nil
 	}
@@ -65,15 +211,7 @@ func DrawNameplate(path, text, faceName string, title bool) (bool, error) {
 	if e != nil {
 		return false, e
 	}
-	entry, ok := Fonts[strings.ToLower(faceName)]
-	if !ok {
-		entry = Fonts["heavy-sans"]
-	}
-	fontData, e := os.ReadFile(entry[0])
-	if e != nil {
-		fontData = gobold.TTF
-	}
-	parsed, e := opentype.Parse(fontData)
+	parsed, e := faceFor(faceName, text)
 	if e != nil {
 		return false, e
 	}
@@ -162,9 +300,22 @@ func ArtKey(text, negative, engine string) string {
 // that has always done the same for the written half. Without it a document
 // carries a prompt and a picture with nothing to say they belong together, and
 // a prompt rewritten later leaves the two describing different things silently.
-func StampArt(prov Record, text, negative, engine, nameplate string) {
-	prov["image_from"] = Record{"prompt": ArtKey(text, negative, engine), "engine": engine,
+// StampArt records what actually drew the picture: the prompt, the renderer, the
+// words painted on it, and the face they were painted in.
+//
+// The face belongs here because it is not always the one that was asked for. A
+// font can fail to draw particular characters, and the fallback is chosen per
+// nameplate -- so two covers for one creator can legitimately be set in two
+// different faces, and neither the creator's configured font nor the title is
+// enough to say which. Without this, a picture drawn in a face that turned out
+// to be unusable looks identical, to every check there is, to one drawn well.
+func StampArt(prov Record, text, negative, engine, nameplate, face string) {
+	stamp := Record{"prompt": ArtKey(text, negative, engine), "engine": engine,
 		"nameplate": nameplate}
+	if face != "" {
+		stamp["face"] = face
+	}
+	prov["image_from"] = stamp
 }
 
 // ArtStale says whether the picture was drawn from words that have since moved
@@ -183,7 +334,26 @@ func ArtStale(prov Record, text, negative, engine, nameplate string) bool {
 	if plate, ok := was["nameplate"]; ok && str(plate) != nameplate {
 		return true
 	}
-	return str(was["prompt"]) != ArtKey(text, negative, engine)
+	// Whether the words would be set the same way today. A face that could not
+	// draw them has since been detected and replaced, so a picture stamped with
+	// the old one needs drawing again -- and one whose title that face could
+	// draw perfectly well does not, which is why this is asked per picture
+	// rather than per font.
+	if was_, ok := was["face"]; ok {
+		if want := ChosenFace(str(was_), nameplate); want != "" && want != str(was_) {
+			return true
+		}
+	}
+	// The prompt gets the same treatment, and for the same reason. A stamp may
+	// record one field and not the other -- a nameplate backfilled onto a
+	// picture drawn before stamping existed has no prompt digest behind it --
+	// and comparing an absent digest against the current one says "stale" for
+	// every such entry. That is the whole-library redraw this function exists
+	// to refuse, arriving through a side door.
+	if digest, ok := was["prompt"]; ok {
+		return str(digest) != ArtKey(text, negative, engine)
+	}
+	return false
 }
 
 func PromptFor(final Record, engine string, item Record) (string, string) {
@@ -353,7 +523,7 @@ func (e *Engine) RenderCover(ctx context.Context, item, final Record, redraw boo
 	if err := e.Generate(ctx, p, dest, negative); err != nil {
 		return "", err
 	}
-	StampArt(nested(item, "provenance"), p, negative, e.Config.Enrich.CoverEngine, str(item["title"]))
+	StampArt(nested(item, "provenance"), p, negative, e.Config.Enrich.CoverEngine, str(item["title"]), ChosenFace(e.CoverFont(str(item["author"])), str(item["title"])))
 	_, err := DrawNameplate(dest, str(item["title"]), e.CoverFont(str(item["author"])), true)
 	return dest, err
 }

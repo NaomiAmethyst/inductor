@@ -173,9 +173,13 @@ func (e *Engine) ingestCommand(ctx context.Context, a Arguments) (out Record, co
 			continue
 		}
 		if stage == "review" {
-			jobs, err := e.ReviewJobs(chosen, len(a.Strings("recover")) > 0)
+			jobs, skipped, err := e.ReviewJobs(chosen, len(a.Strings("recover")) > 0)
 			if err != nil {
 				return counts, err
+			}
+			if len(skipped) > 0 {
+				e.Say("%d recording(s) have nothing to review from; the first: %s",
+					len(skipped), firstReason(skipped))
 			}
 			done, err := e.RunReviews(ctx, jobs, max(1, a.Int("in_flight")), max(1, c.Enrich.BatchSize), time.Duration(max(1, a.Int("poll")))*time.Second, a.Strings("recover"), a.Bool("wait_unfinished"))
 			counts[stage] = done

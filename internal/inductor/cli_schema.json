@@ -417,7 +417,7 @@
         ],
         "action": "append",
         "default": [],
-        "help": "make this artefact again whatever is already on disk (repeatable; any name in the graph, e.g. review, cover)"
+        "help": "make this artefact again whatever is already on disk (repeatable; any name in the graph, e.g. review, sound, cover)"
       },
       {
         "names": [
@@ -484,6 +484,13 @@
         ],
         "action": "store_true",
         "help": "skip writing cached acoustic measurements and missing durations onto entries"
+      },
+      {
+        "names": [
+          "--no-sound-apply"
+        ],
+        "action": "store_true",
+        "help": "skip writing what each recording sounds like onto entries"
       },
       {
         "names": [

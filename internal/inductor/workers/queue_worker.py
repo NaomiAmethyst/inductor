@@ -5,7 +5,7 @@
 Runs on the machine with the GPU and imports nothing from Inductor -- it is
 copied up on its own and has to stand alone.
 
-    jobs/<id>.json   {"id": ..., "kind": "transcribe"|"embed", "audio": "audio/<id>.mp3"}
+    jobs/<id>.json   {"id": ..., "kind": "transcribe"|"embed"|"sound", "audio": "audio/<id>.mp3"}
     out/<id>.json    {"id": ..., "kind": ..., "ok": true, "result": {...}}
     failed/<id>.json {"id": ..., "kind": ..., "ok": false, "error": "..."}
 
@@ -38,13 +38,21 @@ STT_MODEL = os.environ.get("STT_MODEL", "distil-large-v3")
 _models: dict = {}
 
 
-def whisper():
-    if "whisper" not in _models:
+def whisper(name=None):
+    """One loaded model per name, kept.
+
+    Keyed by name rather than held as a single model because a thin transcript
+    is offered to a stronger one, and a run that does that for a handful of
+    recordings should not reload either model for each of them.
+    """
+    name = name or STT_MODEL
+    key = "whisper:" + name
+    if key not in _models:
         from faster_whisper import BatchedInferencePipeline, WhisperModel
         device = os.environ.get("INDUCTOR_DEVICE", "cuda")
-        model = WhisperModel(STT_MODEL, device=device, compute_type="int8" if device == "cpu" else "float16")
-        _models["whisper"] = (model, BatchedInferencePipeline(model=model))
-    return _models["whisper"]
+        model = WhisperModel(name, device=device, compute_type="int8" if device == "cpu" else "float16")
+        _models[key] = (model, BatchedInferencePipeline(model=model))
+    return _models[key]
 
 
 def encoder():
@@ -59,11 +67,24 @@ def encoder():
 
 def do_transcribe(spec: dict) -> dict:
     from decode import transcribe
-    model, pipe = whisper()
-    return transcribe(str(HERE / spec["audio"]), model, pipe,
-                      model_name=STT_MODEL,
+    return transcribe(str(HERE / spec["audio"]), whisper,
+                      model_name=spec.get("model") or STT_MODEL,
+                      fallback=tuple(spec.get("fallback") or ()),
                       batch_size=int(spec.get("batch_size", 16)),
                       language=spec.get("language") or None)
+
+
+def do_sound(spec: dict) -> dict:
+    sys.path.insert(0, str(HERE))
+    import sound_worker as sw
+
+    return sw.analyse(HERE / spec["audio"],
+                      tagger_model=spec.get("tagger") or "",
+                      zeroshot_model=spec.get("zeroshot") or "",
+                      labels=spec.get("labels") or (),
+                      voice=spec.get("voice") or (),
+                      threshold=float(spec.get("threshold", 0.25)),
+                      floor=float(spec.get("floor", 0.35)))
 
 
 def do_embed(spec: dict) -> dict:
@@ -93,7 +114,7 @@ def do_embed(spec: dict) -> dict:
             "windows": windows, "window_seconds": vw.WINDOW_SECONDS}
 
 
-HANDLERS = {"transcribe": do_transcribe, "embed": do_embed}
+HANDLERS = {"transcribe": do_transcribe, "embed": do_embed, "sound": do_sound}
 
 
 def settle(spec: dict, *, ok: bool, result=None, error: str = "") -> None:
@@ -117,6 +138,29 @@ def settle(spec: dict, *, ok: bool, result=None, error: str = "") -> None:
         tmp = where / f".{spec.get('id')}.json"
         tmp.write_text(body, encoding="utf-8")
         tmp.rename(where / f"{spec.get('id')}.json")
+
+
+def discard(where) -> None:
+    """Delete the staged copy, and only ever the staged copy.
+
+    A job may name a file this box already had -- the archive can live on a
+    filesystem both machines mount, in which case nothing was copied here and
+    the path points at the original. Checking that the parent directory happens
+    to be called "audio" is not enough to tell those apart: plenty of archives
+    have a directory called audio, and deleting what is in it would take the
+    recording itself. Resolve, and require the result to be inside this
+    worker's own staging directory.
+    """
+    if not where:
+        return
+    staged = (HERE / "audio").resolve()
+    try:
+        audio = (HERE / str(where)).resolve()
+        audio.relative_to(staged)
+    except (ValueError, OSError):
+        return
+    if audio.is_file():
+        audio.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -166,9 +210,7 @@ def drain() -> int:
             print(f"  FAILED {spec.get('kind')} {spec.get('id')}", flush=True)
         finally:
             path.unlink(missing_ok=True)
-            audio = HERE / str(spec.get("audio") or "")
-            if audio.is_file() and audio.parent.name == "audio":
-                audio.unlink(missing_ok=True)
+            discard(spec.get("audio"))
     print("STOP seen; exiting", flush=True)
     return 0
 

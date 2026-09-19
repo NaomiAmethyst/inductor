@@ -43,7 +43,13 @@ func (s *Source) AudioPath(root string) string {
 }
 
 type SourceReport struct {
-	Sources          []*Source
+	Sources []*Source
+	// Authors is what a parser learned about the creators themselves, keyed by
+	// author id. A mirror of somebody's site has their bio, their picture and
+	// their links sitting right there, and without somewhere to put them the
+	// pipeline throws all three away and then asks a model to invent a synopsis
+	// and draw an avatar -- both strictly worse than what the site already said.
+	Authors          map[string]Record
 	Errors, Warnings []string
 }
 
@@ -63,6 +69,8 @@ func LoadSources(root string, watch ...func(done, total int)) (SourceReport, err
 	seen := map[string]string{}
 	titles := map[string]map[string]int{}
 	known := pythonFields("apiVersion kind audio title author author_id date description summary tags categories series series_index source_url cover explicit variant provenance duration")
+	knownAuthor := pythonFields("apiVersion kind id name author url image links language explicit description summary provenance")
+	r.Authors = map[string]Record{}
 	for n, p := range files {
 		for _, w := range watch {
 			w(n, len(files))
@@ -99,6 +107,37 @@ func LoadSources(root string, watch ...func(done, total int)) (SourceReport, err
 					r.Errors = append(r.Errors, where+": expected a mapping")
 					continue
 				}
+				// A creator, rather than a recording. Same file, because what a
+				// parser learns about the two comes from the same pass over the
+				// same mirror, and splitting them would mean two things to keep
+				// in step.
+				if strings.EqualFold(strings.TrimSpace(str(d["kind"])), "author") {
+					name := strings.TrimSpace(str(first(d["name"], d["author"])))
+					if name == "" {
+						r.Errors = append(r.Errors, where+": author record has no name")
+						continue
+					}
+					id := strings.TrimSpace(str(d["id"]))
+					if id == "" {
+						id = Slug(name)
+					}
+					unknown := []string{}
+					for _, k := range sortedKeys(d) {
+						if !contains(knownAuthor, k) {
+							unknown = append(unknown, k)
+						}
+					}
+					if len(unknown) > 0 {
+						r.Warnings = append(r.Warnings, where+": unrecognised author field(s) "+strings.Join(unknown, ", "))
+					}
+					if _, twice := r.Authors[id]; twice {
+						r.Warnings = append(r.Warnings, where+": a second author record for "+id)
+					}
+					d["name"] = name
+					d["id"] = id
+					r.Authors[id] = d
+					continue
+				}
 				missing := []string{}
 				for _, k := range []string{"audio", "title", "author"} {
 					if strings.TrimSpace(str(d[k])) == "" {
@@ -118,7 +157,12 @@ func LoadSources(root string, watch ...func(done, total int)) (SourceReport, err
 				if len(unknown) > 0 {
 					r.Warnings = append(r.Warnings, where+": unrecognised field(s) "+strings.Join(unknown, ", "))
 				}
-				s := &Source{Path: p, Audio: str(d["audio"]), Title: strings.TrimSpace(str(d["title"])), Author: strings.TrimSpace(str(d["author"])), Data: d}
+				// Cleaned at the boundary, where everything downstream reads
+				// it -- the item, the filename, the nameplate and the site.
+				title := strings.TrimSpace(StripControls(str(d["title"])))
+				author := strings.TrimSpace(StripControls(str(d["author"])))
+				d["title"], d["author"] = title, author
+				s := &Source{Path: p, Audio: str(d["audio"]), Title: title, Author: author, Data: d}
 				if before := seen[s.Audio]; before != "" {
 					r.Errors = append(r.Errors, where+": audio already claimed by "+before)
 					continue

@@ -264,7 +264,7 @@ func (e *Engine) Authors(ctx context.Context, o AuthorOptions) (Record, error) {
 						if _, err = DrawNameplate(dest, str(first(j.Doc.Data["name"], j.Doc.Data["id"])), str(p["font"]), false); err != nil {
 							return report, err
 						}
-						StampArt(nested(j.Doc.Data, "provenance"), text, "", engine, str(first(j.Doc.Data["name"], j.Doc.Data["id"])))
+						StampArt(nested(j.Doc.Data, "provenance"), text, "", engine, str(first(j.Doc.Data["name"], j.Doc.Data["id"])), ChosenFace(str(p["font"]), str(first(j.Doc.Data["name"], j.Doc.Data["id"]))))
 					}
 					j.Doc.Data["image"] = e.Config.Portable(dest, filepath.Dir(j.Doc.Path))
 					MarkGenerated(nested(j.Doc.Data, "provenance"), "image")
@@ -405,7 +405,7 @@ func (e *Engine) Artwork(ctx context.Context, author string, limit, workers int,
 		}
 		// The picture changed even though its path did not, so the document has
 		// to be written back for the stamp to survive the run.
-		StampArt(nested(d.Data, "provenance"), p, negative, engine, str(d.Data["title"]))
+		StampArt(nested(d.Data, "provenance"), p, negative, engine, str(d.Data["title"]), ChosenFace(e.CoverFont(str(d.Data["author"])), str(d.Data["title"])))
 		MarkGenerated(nested(d.Data, "provenance"), "cover")
 		d.Data["cover"] = e.Config.Portable(dest, filepath.Dir(d.Path))
 		_, err = SaveDocument(d.Path, d.Data)

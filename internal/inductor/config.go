@@ -10,12 +10,43 @@ import (
 )
 
 type TranscribeSettings struct {
-	Model     string `yaml:"model"`
-	Remote    string `yaml:"remote"`
-	RemoteDir string `yaml:"remote_dir"`
-	BatchSize int    `yaml:"batch_size"`
-	Language  string `yaml:"language"`
-	Workers   int    `yaml:"workers"`
+	Model string `yaml:"model"`
+	// Fallback names stronger models to hand a thin transcript to. The first
+	// model runs with the voice gate on; when what comes back is too sparse for
+	// the running time these are tried in turn, and the transcript records
+	// whichever one actually answered.
+	Fallback  []string      `yaml:"fallback"`
+	Remote    string        `yaml:"remote"`
+	RemoteDir string        `yaml:"remote_dir"`
+	BatchSize int           `yaml:"batch_size"`
+	Language  string        `yaml:"language"`
+	Workers   int           `yaml:"workers"`
+	Sound     SoundSettings `yaml:"sound"`
+}
+
+// SoundSettings configures the pass that asks what a recording sounds like
+// rather than what it says. Two models, because they answer different
+// questions: the tagger is multi-label over a fixed ontology, so its "there is
+// a voice here" is an absolute reading that stands whatever else is true of the
+// audio; the zero-shot model ranks whatever phrases it is handed, which makes
+// it the one worth giving a vocabulary to and the one that cannot say "none of
+// these". Either may be left empty to skip it.
+type SoundSettings struct {
+	Tagger   string `yaml:"tagger"`
+	Zeroshot string `yaml:"zeroshot"`
+	// Labels is the vocabulary the zero-shot model ranks. The defaults describe
+	// sound in general; a collection with its own subject matter should say so
+	// here, because a label that is never offered is never returned.
+	Labels []string `yaml:"labels"`
+	// Voice is the ontology labels that mean somebody is speaking, and Threshold
+	// how sure the tagger has to be. This is the gate that decides whether a
+	// thin transcript is a failure to hear or a recording with no words in it.
+	Voice     []string `yaml:"voice"`
+	Threshold float64  `yaml:"threshold"`
+	// Floor is how close a zero-shot label must actually be before it counts as
+	// an identification rather than the nearest thing on a list the model was
+	// not allowed to refuse. Below it the labels are recorded and not believed.
+	Floor float64 `yaml:"floor"`
 }
 type EnrichSettings struct {
 	AnalysisModel string `yaml:"analysis_model"`
@@ -45,7 +76,7 @@ type Config struct {
 }
 
 func LoadConfig(root string) (Config, error) {
-	c := Config{Root: absolute(root), Transcribe: TranscribeSettings{"distil-large-v3", "", "~/inductor-stt", 16, "en", 6}, Enrich: EnrichSettings{AnalysisModel: "deepseek/deepseek-v4-flash", ReviewModel: "google/gemini-3.8-flash:batch", ReviewFallback: []string{"z-ai/glm-5.3-flash"}, AdjudicatorModel: "anthropic/claude-opus-5", Workers: 12, BatchSize: 150, Covers: true, CoverEngine: "turbo", CoverWidth: 1024, CoverHeight: 576}, MediaSettings: MediaSettings{"symlink", "if-needed"}}
+	c := Config{Root: absolute(root), Transcribe: TranscribeSettings{Model: "distil-large-v3", RemoteDir: "~/inductor-stt", BatchSize: 16, Language: "en", Workers: 6, Sound: DefaultSound()}, Enrich: EnrichSettings{AnalysisModel: "deepseek/deepseek-v4-flash", ReviewModel: "google/gemini-3.8-flash:batch", ReviewFallback: []string{"z-ai/glm-5.3-flash"}, AdjudicatorModel: "anthropic/claude-opus-5", Workers: 12, BatchSize: 150, Covers: true, CoverEngine: "turbo", CoverWidth: 1024, CoverHeight: 576}, MediaSettings: MediaSettings{"symlink", "if-needed"}}
 	r := Record{}
 	for _, n := range []string{"inductor.yaml", "inductor.yml"} {
 		p := filepath.Join(c.Root, n)

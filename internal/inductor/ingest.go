@@ -165,18 +165,22 @@ type Engine struct {
 	Index        *ItemIndex
 	Store        *AnalysisStore
 	Acoustic     AcousticStore
+	Sounds       SoundStore
 	Box          *GPUBox
-	Say          func(string, ...any)
-	Colour       bool
-	Out          io.Writer
-	boxOnce      sync.Once
-	boxErr       error
-	noProvision  bool
-	locks        sync.Map
+	// Say is called from every goroutine a run starts -- phases, the workers
+	// under them, the progress reporter -- so whatever is plugged in here has
+	// to serialise its own writes.
+	Say         func(string, ...any)
+	Colour      bool
+	Out         io.Writer
+	boxOnce     sync.Once
+	boxErr      error
+	noProvision bool
+	locks       sync.Map
 }
 
 func NewEngine(c Config) *Engine {
-	return &Engine{Config: c, API: NewAPIClient(c), Fingerprints: NewFingerprintCache(filepath.Join(c.Cache, "fingerprints.json")), Soundness: NewSoundnessCache(filepath.Join(c.Cache, "soundness.json")), Index: NewItemIndex(filepath.Join(c.Cache, "item-index.json")), Store: &AnalysisStore{Root: c.Analysis()}, Acoustic: AcousticStore{filepath.Join(c.Cache, "acoustic")}, Say: func(string, ...any) {}}
+	return &Engine{Config: c, API: NewAPIClient(c), Fingerprints: NewFingerprintCache(filepath.Join(c.Cache, "fingerprints.json")), Soundness: NewSoundnessCache(filepath.Join(c.Cache, "soundness.json")), Index: NewItemIndex(filepath.Join(c.Cache, "item-index.json")), Store: &AnalysisStore{Root: c.Analysis()}, Acoustic: AcousticStore{filepath.Join(c.Cache, "acoustic")}, Sounds: SoundStore{filepath.Join(c.Cache, "sound")}, Say: func(string, ...any) {}}
 }
 func (e *Engine) Close() error {
 	if err := e.Fingerprints.Save(); err != nil {
@@ -260,7 +264,7 @@ func (e *Engine) fingerprint(j Planned) (string, error) {
 func (e *Engine) transcript(fp string) Record {
 	return readJSON(filepath.Join(e.Config.Transcripts(), fp+".json"))
 }
-func (e *Engine) meta(j Planned, payload, measured Record) Record {
+func (e *Engine) meta(j Planned, payload, measured, heard Record) Record {
 	author := j.Source.Author
 	docs, _ := Documents(e.Config.Content, "author")
 	for _, d := range docs {
@@ -269,7 +273,7 @@ func (e *Engine) meta(j Planned, payload, measured Record) Record {
 			break
 		}
 	}
-	return Record{"title": j.Source.Title, "author_name": author, "duration": first(j.Source.Data["duration"], payload["duration"]), "series": j.Source.Data["series"], "existing_description": str(j.Source.Data["description"]), "measured": measured}
+	return Record{"title": j.Source.Title, "author_name": author, "duration": first(j.Source.Data["duration"], payload["duration"]), "series": j.Source.Data["series"], "existing_description": str(j.Source.Data["description"]), "measured": measured, "heard": heard, "sound_settings": e.Config.Transcribe.Sound}
 }
 func (e *Engine) ensureBox(ctx context.Context) error {
 	e.boxOnce.Do(func() {
@@ -313,7 +317,12 @@ func (e *Engine) Transcribe(ctx context.Context, j Planned, embed, redo bool) er
 	if redo {
 		_ = os.Remove(filepath.Join(landing, id+".json"))
 	}
-	r, err := e.Box.Work(ctx, id, kind, audio, landing)
+	extra := Record{}
+	if !embed {
+		extra["model"] = e.Config.Transcribe.Model
+		extra["fallback"] = e.Config.Transcribe.Fallback
+	}
+	r, err := e.Box.Work(ctx, id, kind, audio, landing, extra)
 	if err != nil {
 		return err
 	}
@@ -322,6 +331,56 @@ func (e *Engine) Transcribe(ctx context.Context, j Planned, embed, redo bool) er
 		r["kind"] = "VoicePrint"
 	}
 	return writeJSON(dest, r)
+}
+
+// Listen asks what a recording sounds like. It runs for every recording, not
+// only the ones whose transcript came back thin: the question "what is this"
+// has an answer for a guided session too, and a pass that only ever looked at
+// the silent ones could never say that the rest are not silent.
+func (e *Engine) Listen(ctx context.Context, j Planned, redo bool) error {
+	cfg := e.Config.Transcribe.Sound
+	if cfg.Tagger == "" && cfg.Zeroshot == "" {
+		return NothingToProduce{"no sound models configured"}
+	}
+	fp, err := e.fingerprint(j)
+	if err != nil {
+		return err
+	}
+	lock, _ := e.locks.LoadOrStore("sound:"+fp, &sync.Mutex{})
+	mu := lock.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	if e.Sounds.Has(fp) && !redo {
+		return nil
+	}
+	audio := PlacedAudio(e.Config, j.Source, j.Stem)
+	if audio == "" {
+		audio = j.Source.AudioPath(e.Config.Sources)
+	}
+	// The spectrum is arithmetic: no model, no GPU, no network. It is measured
+	// here rather than on the box so that a library with nowhere to run the
+	// taggers still learns what its tone tracks are made of.
+	r := Record{}
+	seconds := number(first(j.Source.Data["duration"], e.Acoustic.Measurements(fp)["seconds"]))
+	if t, e2 := Tones(ctx, audio, seconds); e2 == nil {
+		r["tones"] = t
+	}
+	if err = e.ensureBox(ctx); err != nil {
+		return err
+	}
+	id := "sound-" + fp
+	landing := filepath.Join(e.Config.Cache, "remote-out")
+	if redo {
+		_ = os.Remove(filepath.Join(landing, id+".json"))
+	}
+	heard, err := e.Box.Work(ctx, id, "sound", audio, landing, Record{
+		"tagger": cfg.Tagger, "zeroshot": cfg.Zeroshot, "labels": cfg.Labels,
+		"voice": cfg.Voice, "threshold": cfg.Threshold, "floor": cfg.Floor})
+	if err != nil {
+		return err
+	}
+	merge(r, heard)
+	return e.Sounds.Put(fp, r)
 }
 
 type NothingToProduce struct{ Reason string }
@@ -336,15 +395,28 @@ func (e *Engine) Analyze(ctx context.Context, j Planned, redo bool) error {
 	if p == nil {
 		return fmt.Errorf("no transcript yet")
 	}
+	key := TranscriptKey(str(p["text"]))
+	// Declining has to be remembered, or it is not a decision, it is a question
+	// asked again on every run for ever. Nothing about this recording will
+	// change until its transcript does -- and when that happens the key changes
+	// with it, so the refusal expires exactly when it should.
+	decline := func(why string) error {
+		if !truth(e.Store.Peek(key, fp)["analysis_declined"]) {
+			_ = e.Store.Put(key, Record{"analysis_declined": why}, fp, "")
+		}
+		return NothingToProduce{why}
+	}
+	if str(p["speech"]) == "none" {
+		return decline("no speech in the recording")
+	}
 	s := Sentences(p)
 	spoken := 0
 	for _, v := range s {
 		spoken += len([]rune(v.Text))
 	}
 	if spoken < 200 {
-		return NothingToProduce{fmt.Sprintf("%d characters of transcript, too little to analyse", spoken)}
+		return decline(fmt.Sprintf("%d characters of transcript, too little to analyse", spoken))
 	}
-	key := TranscriptKey(str(p["text"]))
 	lock, _ := e.locks.LoadOrStore("analysis:"+key, &sync.Mutex{})
 	mu := lock.(*sync.Mutex)
 	mu.Lock()
@@ -357,18 +429,42 @@ func (e *Engine) Analyze(ctx context.Context, j Planned, redo bool) error {
 	if err != nil {
 		return err
 	}
-	result, err := e.API.ChatJSON(ctx, e.Config.Enrich.AnalysisModel, AnalysisMessages(s, e.meta(j, p, nil), reg), TokenCeiling, .15)
+	result, err := e.API.ChatJSON(ctx, e.Config.Enrich.AnalysisModel, AnalysisMessages(s, e.meta(j, p, nil, nil), reg), TokenCeiling, .15)
 	if err != nil {
 		return err
 	}
 	return e.Store.Put(key, Record{"analysis": PruneCitations(result, s)}, fp, e.Config.Enrich.AnalysisModel)
 }
-func (e *Engine) ReviewJobs(jobs []Planned, redo bool) ([]ReviewJob, error) {
+
+// reviewRoute decides how a recording with no first pass should be reviewed,
+// and says so rather than leaving the caller to infer it from an empty result.
+//
+// The speech field only exists on transcripts taken since the transcriber
+// learned to report one, so an older transcript answers "unknown" and the
+// length of what it heard has to stand in.
+func (e *Engine) reviewRoute(p, heard Record) (string, string) {
+	text := strings.TrimSpace(str(p["text"]))
+	said := len([]rune(text))
+	if str(p["speech"]) != "none" && said >= 40 {
+		return "solo", ""
+	}
+	if truth(heard) {
+		return "wordless", ""
+	}
+	return "", fmt.Sprintf("nothing to review: %d characters transcribed and nothing heard of the audio", said)
+}
+
+// ReviewJobs builds the reviews still wanted, and reports what it could not
+// build and why. A recording it declines is not a failure -- it is one nobody
+// can write an entry for from what is on disk -- and calling it one buries the
+// batches that really did go wrong.
+func (e *Engine) ReviewJobs(jobs []Planned, redo bool) ([]ReviewJob, map[string]string, error) {
 	reg, err := LoadRegistry(e.Config.RegistryPath())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := []ReviewJob{}
+	skipped := map[string]string{}
 	seen := map[string]bool{}
 	for _, j := range jobs {
 		fp, err := e.fingerprint(j)
@@ -381,9 +477,10 @@ func (e *Engine) ReviewJobs(jobs []Planned, redo bool) ([]ReviewJob, error) {
 		}
 		key := TranscriptKey(str(p["text"]))
 		r := e.Store.Get(key, fp)
-		if !truth(r["analysis"]) || (!redo && truth(r["final"])) {
+		if !redo && truth(r["final"]) {
 			continue
 		}
+		heard := e.Sounds.Get(fp)
 		s := Sentences(p)
 		m := e.Acoustic.Measurements(fp)
 		if m == nil {
@@ -395,9 +492,28 @@ func (e *Engine) ReviewJobs(jobs []Planned, redo bool) ([]ReviewJob, error) {
 			continue
 		}
 		seen[key] = true
-		out = append(out, ReviewJob{id, ReviewMessages(record(r["analysis"]), s, e.meta(j, p, m), reg), fp, key, s})
+		meta := e.meta(j, p, m, heard)
+		msgs := ReviewMessages(record(r["analysis"]), s, meta, reg)
+		if !truth(r["analysis"]) {
+			// No first pass, for one of two reasons, and they want different
+			// prompts. A recording with a few words in it has something to read,
+			// just not enough to have been worth analysing; one with none at all
+			// can only be described from what it sounds like. Handing the second
+			// prompt to the first kind would tell a model to describe as
+			// wordless a recording that plainly says something.
+			switch which, why := e.reviewRoute(p, heard); which {
+			case "solo":
+				msgs = SoloMessages(s, meta, reg)
+			case "wordless":
+				msgs = WordlessMessages(meta, reg)
+			default:
+				skipped[id] = why
+				continue
+			}
+		}
+		out = append(out, ReviewJob{id, msgs, fp, key, s})
 	}
-	return out, nil
+	return out, skipped, nil
 }
 func (e *Engine) batchJournal(id string) string {
 	return filepath.Join(e.Config.Cache, "batches", id+".json")
@@ -874,7 +990,55 @@ func (e *Engine) Emit(ctx context.Context, j Planned, covers, overwrite, redraw 
 		}
 	}
 	authorPath := filepath.Join(c.Content, s.AuthorID(), "_author.yaml")
-	return writeYAML(authorPath, Record{"apiVersion": "hypnotica/v1", "kind": "Author", "id": s.AuthorID(), "name": s.Author, "needs": []string{"summary", "description"}}, authorOrder)
+	return writeYAML(authorPath, NewAuthorPage(s.AuthorID(), s.Author, e.sourceAuthor(s.AuthorID())), authorOrder)
+}
+
+// sourceAuthor is whatever a parser recorded about this creator, if anything.
+// LoadSources memoises on the file stamps, so asking once per recording costs a
+// map lookup rather than a re-parse.
+func (e *Engine) sourceAuthor(id string) Record {
+	r, err := LoadSources(e.Config.Sources)
+	if err != nil {
+		return nil
+	}
+	return r.Authors[id]
+}
+
+// NewAuthorPage builds a creator page, using whatever the parser learned about
+// them and asking for the rest.
+//
+// `needs` is the whole mechanism: a field named there is one a later pass will
+// fill in, so anything the source supplied must *not* be listed, or the model
+// writes over the creator's own words on the next run. Fields that arrive this
+// way are never marked generated either, because they were not.
+func NewAuthorPage(id, name string, supplied Record) Record {
+	page := Record{"apiVersion": "hypnotica/v1", "kind": "Author", "id": id, "name": name}
+	for _, f := range []string{"url", "links", "language", "explicit", "image", "description", "summary"} {
+		if truth(supplied[f]) {
+			page[f] = supplied[f]
+		}
+	}
+	if truth(supplied["name"]) {
+		page["name"] = str(supplied["name"])
+	}
+	want := []string{}
+	for _, f := range []string{"summary", "description"} {
+		if !truth(page[f]) {
+			want = append(want, f)
+		}
+	}
+	if len(want) > 0 {
+		page["needs"] = want
+	}
+	if len(supplied) > 0 {
+		prov := nested(page, "provenance")
+		prov["metadata_source"] = str(first(record(supplied["provenance"])["metadata_source"],
+			"the creator's own page"))
+		if truth(page["description"]) {
+			prov["description_from_source"] = true
+		}
+	}
+	return page
 }
 
 // ManagedBy marks an entry as Inductor's own, so that removing the source
@@ -902,4 +1066,13 @@ func MarkGenerated(p Record, fields ...string) {
 	}
 	sort.Strings(a)
 	p["generated"] = a
+}
+
+// firstReason names one of a set of declined recordings, for a line that says
+// how many there were without printing all of them.
+func firstReason(skipped map[string]string) string {
+	for _, id := range sortedKeys(skipped) {
+		return id + " — " + skipped[id]
+	}
+	return ""
 }

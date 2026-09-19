@@ -2,14 +2,11 @@
 package inductor
 
 import (
-	"bytes"
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -135,13 +132,8 @@ func TestRunMapsBeforeGraphAndAdjudicatesEmittedProposals(t *testing.T) {
 	putRecord(t, filepath.Join(c.Sources, "other.yaml"), Record{"audio": "missing.mp3", "title": "Other", "author": "Other", "tags": []string{"unmapped"}})
 	putRecord(t, MappingPath(c, "creator"), Record{"author": "creator", "mapping": []any{Record{"tag": "relaxing", "to": "Relaxation", "verdict": "map"}}})
 	e := NewEngine(c)
-	var output bytes.Buffer
-	var outputMu sync.Mutex
-	e.Say = func(f string, args ...any) {
-		outputMu.Lock()
-		defer outputMu.Unlock()
-		fmt.Fprintf(&output, f+"\n", args...)
-	}
+	say, said := sayInto()
+	e.Say = say
 	fp, err := Fingerprint(audio)
 	if err != nil {
 		t.Fatal(err)
@@ -187,8 +179,8 @@ func TestRunMapsBeforeGraphAndAdjudicatesEmittedProposals(t *testing.T) {
 	}
 	for _, label := range []string{"entry creator/one", "tagmap creator tags 1-1/1", "adjudication request (1 tags)", "apply adjudication (1 rulings, write=true)"} {
 		for _, prefix := range []string{"dispatch: ", "completed: "} {
-			if !strings.Contains(output.String(), prefix+label) {
-				t.Errorf("missing verbose event %s%s: %s", prefix, label, output.String())
+			if !strings.Contains(said(), prefix+label) {
+				t.Errorf("missing verbose event %s%s: %s", prefix, label, said())
 			}
 		}
 	}

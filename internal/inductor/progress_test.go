@@ -156,8 +156,8 @@ func TestGraphProgressCountsFailuresAndBlockedWork(t *testing.T) {
 func TestRunProgressFlagsReachMaintenance(t *testing.T) {
 	for _, verbose := range []bool{false, true} {
 		e, _ := runFixture(t)
-		var out bytes.Buffer
-		e.Say = func(f string, args ...any) { fmt.Fprintf(&out, f+"\n", args...) }
+		say, said := sayInto()
+		e.Say = say
 		flags := []string{"--no-progress", "--no-tagmaps", "--no-adjudicate"}
 		if verbose {
 			flags = append(flags, "--verbose")
@@ -165,7 +165,7 @@ func TestRunProgressFlagsReachMaintenance(t *testing.T) {
 		if _, err := dispatchRun(t, e, flags...); err != nil {
 			t.Fatal(err)
 		}
-		output := out.String()
+		output := said()
 		if strings.Contains(output, "progress:") {
 			t.Fatal("--no-progress emitted a heartbeat", output)
 		}

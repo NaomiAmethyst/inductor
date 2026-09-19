@@ -34,6 +34,8 @@ func metadataHeader(meta Record, review bool) []string {
 			out = append(out, fmt.Sprintf("Running time: %.0f minutes", number(meta["duration"])/60))
 		}
 		out = append(out, MeasuredBlock(record(meta["measured"]))...)
+		cfg, _ := meta["sound_settings"].(SoundSettings)
+		out = append(out, SoundBlock(record(meta["heard"]), cfg)...)
 	}
 	if truth(meta["existing_description"]) {
 		intro := "\nThe creator's own write-up (may be marketing copy, may omit things, treat as a claim not a fact):\n"
@@ -203,6 +205,18 @@ func SoloMessages(s []Sentence, meta Record, r *Registry) []any {
 		}
 	}
 	return messages(prompt("finalise_solo_system"), strings.Join(metadataHeader(meta, true), "\n")+"\n\nTAG REGISTRY — each tag with what it means. Copy exactly where one fits; a definition that covers your meaning settles it.\n"+r.Block()+"\n\nTRANSCRIPT:\n"+strings.Join(body, " ")+"\n\nReturn JSON in exactly this shape:\n"+prompt("finalise_shape"))
+}
+
+// WordlessMessages asks for an entry for a recording with nothing said in it.
+// There is no transcript to send and no first pass to check, so what goes up is
+// what the audio was measured and heard to be, plus whatever the creator
+// claimed -- clearly marked as a claim, because for these it is routinely a
+// description of a different file.
+func WordlessMessages(meta Record, r *Registry) []any {
+	return messages(prompt("finalise_wordless_system"),
+		strings.Join(metadataHeader(meta, true), "\n")+
+			"\n\nTAG REGISTRY — each tag with what it means. Copy exactly where one fits; a definition that covers your meaning settles it.\n"+r.Block()+
+			"\n\nThere is no transcript: the recording contains no speech. Everything you know about it is above.\n\nReturn JSON in exactly this shape:\n"+prompt("finalise_shape"))
 }
 func MeasuredBlock(m Record) []string {
 	if len(m) == 0 {

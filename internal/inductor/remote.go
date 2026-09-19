@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-//go:embed workers/queue_worker.py workers/voice_worker.py workers/decode.py
+//go:embed workers/queue_worker.py workers/voice_worker.py workers/decode.py workers/sound_worker.py
 var workerFiles embed.FS
 var safeJobID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
@@ -27,9 +27,10 @@ type GPUBox struct {
 	mu              sync.Mutex
 
 	// How to install into the worker's venv, kept from provisioning so the
-	// embedding half can be fetched at the point something asks for it.
+	// halves nothing has asked for yet can be fetched at the point something does.
 	install  func(mods, pkgs string) string
 	embedded sync.Once
+	tagging  sync.Once
 }
 
 func NewGPUBox(c Config, directory string) *GPUBox {
@@ -126,17 +127,63 @@ func (b *GPUBox) Stop(ctx context.Context) error {
 	_, e := b.run(ctx, "touch "+shellQuote(b.Directory+"/STOP"))
 	return e
 }
-func (b *GPUBox) Enqueue(ctx context.Context, id, kind, audio string) error {
-	if !safeJobID.MatchString(id) || !contains([]string{"transcribe", "embed"}, kind) {
+
+// shared decides whether the box is already looking at the very same file.
+//
+// The archive can be on a filesystem both machines mount, and when it is,
+// copying each recording across the network to transcribe it is pure waste --
+// a hundred gigabytes of it on a library this size. The audio under media/ is
+// usually a symlink into that filesystem, so what gets probed is the link's
+// target: media/ belongs to the workdir, and the shared thing is what it points
+// at.
+//
+// Identity is size and modification time, which is the same test
+// cache/inductor/fingerprints.json already trusts to decide a cached
+// fingerprint still belongs to the file it was taken from. Device and inode
+// would be better and do not survive the trip between hosts. Getting this wrong
+// in the cautious direction costs a copy that was not needed; getting it wrong
+// the other way would transcribe the wrong recording, so both must agree and a
+// probe that fails for any reason falls back to copying.
+func (b *GPUBox) shared(ctx context.Context, audio string) string {
+	if b.Host == "" {
+		return ""
+	}
+	real, e := filepath.EvalSymlinks(audio)
+	if e != nil {
+		return ""
+	}
+	info, e := os.Stat(real)
+	if e != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	out, e := b.run(ctx, "stat -c '%s %Y' "+shellQuote(real)+" 2>/dev/null")
+	if e != nil {
+		return ""
+	}
+	fields := pythonFields(string(out))
+	if len(fields) != 2 {
+		return ""
+	}
+	if fields[0] != fmt.Sprint(info.Size()) || fields[1] != fmt.Sprint(info.ModTime().Unix()) {
+		return ""
+	}
+	return real
+}
+
+func (b *GPUBox) Enqueue(ctx context.Context, id, kind, audio string, extra Record) error {
+	if !safeJobID.MatchString(id) || !contains([]string{"transcribe", "embed", "sound"}, kind) {
 		return fmt.Errorf("invalid GPU job")
 	}
 	ext := strings.ToLower(filepath.Ext(audio))
 	name := "audio/" + id + ext
 	spec := Record{"id": id, "kind": kind, "audio": name, "batch_size": b.Config.Transcribe.BatchSize, "language": b.Config.Transcribe.Language}
+	merge(spec, extra)
 	if _, e := b.run(ctx, "test -f "+shellQuote(b.Directory+"/jobs/"+id+".json")+" || test -f "+shellQuote(b.Directory+"/out/"+id+".json")); e == nil {
 		return nil
 	}
-	if e := b.send(ctx, audio, name); e != nil {
+	if there := b.shared(ctx, audio); there != "" {
+		spec["audio"] = there
+	} else if e := b.send(ctx, audio, name); e != nil {
 		return e
 	}
 	f, e := os.CreateTemp("", "inductor-job-*.json")
@@ -207,13 +254,23 @@ func (b *GPUBox) Collect(ctx context.Context, into string) (int, error) {
 	}
 	return count, nil
 }
-func (b *GPUBox) Work(ctx context.Context, id, kind, audio, landing string) (Record, error) {
+func (b *GPUBox) Work(ctx context.Context, id, kind, audio, landing string, extra Record) (Record, error) {
 	path := filepath.Join(landing, id+".json")
 	if r := readJSON(path); r != nil {
 		if truth(r["ok"]) {
 			return record(r["result"]), nil
 		}
 		_ = os.Remove(path)
+	}
+	if kind == "sound" {
+		// The tagging models and their runtime are gigabytes and only a sound
+		// job wants them, so they are fetched when one arrives rather than at
+		// provisioning -- which keeps a box with no room for them transcribing.
+		b.tagging.Do(func() {
+			if b.install != nil {
+				_, _ = b.run(ctx, b.install("transformers, torch", "torch transformers"))
+			}
+		})
 	}
 	if kind == "embed" {
 		// Torch and speechbrain are gigabytes, and nothing but an embedding job
@@ -226,7 +283,7 @@ func (b *GPUBox) Work(ctx context.Context, id, kind, audio, landing string) (Rec
 			}
 		})
 	}
-	if e := b.Enqueue(ctx, id, kind, audio); e != nil {
+	if e := b.Enqueue(ctx, id, kind, audio, extra); e != nil {
 		return nil, e
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Hour)

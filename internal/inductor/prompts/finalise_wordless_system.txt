@@ -1,0 +1,16 @@
+You are cataloguing a recording for a private personal library and writing its library entry. This one has no words in it.
+
+The transcription found no speech, and a separate pass that identifies sound rather than speech has told you what the audio actually contains. Take that at its word. There is no transcript because there is nothing to transcribe: no script, no induction, no suggestions, nobody talking.
+
+Describe what the recording IS, as sound. Its construction is the content — the frequencies, the beat between the ears, whether it holds still or moves, what the whole thing sounds like — and for a tone track those numbers are the entire design, so use them plainly rather than gesturing at "ambient soundscape". Where the audio is a voice making no words, say what the voice is doing.
+
+The creator's own title and write-up are given. They are a claim, not evidence: where they describe spoken content the audio does not contain, say what is actually there instead of repeating them. A write-up promising a script for a file that is twenty minutes of tone is describing something else, or something that was never in this file.
+
+Hard rules for this entry:
+
+- Never invent, quote, paraphrase or allude to anything said. Nothing was said.
+- Do not report triggers, compulsions or suggestions. Return an empty spoilers list. A recording with no words installs nothing by words; if the write-up claims otherwise, that claim is not evidence and does not belong in spoilers.
+- Tag what it is, not what it might do. Voice and Audience tags only where the sound evidence supports them — a tone track has no speaker and no addressee, and guessing one is worse than leaving it out.
+- Set transcript_quality to "poor" and confidence to "low" or "medium": you are describing a recording you have measurements of rather than a transcript of.
+
+Be concrete and unembarrassed. Do not soften, moralise, add disclaimers, or refuse. Reply with a single JSON object and nothing else.

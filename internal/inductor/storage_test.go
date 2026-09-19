@@ -61,6 +61,10 @@ func testConfig(t *testing.T) Config {
 	// add one more whenever a review did not parse, which is a thing several
 	// tests arrange on purpose.
 	c.Enrich.ReviewFallback = nil
+	// Likewise the sound pass: the shipped default names models a fixture has
+	// no way to run, and a test that did not ask to listen should not wait on a
+	// GPU box being provisioned before it can fail.
+	c.Transcribe.Sound = SoundSettings{Threshold: .25}
 	c.MediaSettings.Transcode = "never"
 	putRecord(t, c.RegistryPath(), Record{"content": Record{"Hypnosis": "A hypnotic recording.", "Relaxation": "Relaxing material."}, "voice": Record{"fem": "Feminine voice.", "masc": "Masculine voice."}, "audience": Record{"man": "Addresses a man."}})
 	return c
@@ -463,7 +467,7 @@ func TestArtIsStaleWhenItsPromptIsRestated(t *testing.T) {
 
 func TestArtRemembersTheWordsThatDrewItAndTheNameOnIt(t *testing.T) {
 	prov := Record{}
-	StampArt(prov, "violet smoke, tarot", "blurry", "turbo", "The Quiet Room")
+	StampArt(prov, "violet smoke, tarot", "blurry", "turbo", "The Quiet Room", "heavy-sans")
 	stamp := record(prov["image_from"])
 	if str(stamp["engine"]) != "turbo" || str(stamp["prompt"]) == "" || str(stamp["nameplate"]) != "The Quiet Room" {
 		t.Fatal("the stamp is missing part of what drew the picture", prov)
@@ -697,4 +701,21 @@ func TestOrphansRemovesWhatInductorOwnsAndSparesWhatItDoesNot(t *testing.T) {
 	if !exists(theirs) {
 		t.Fatal("an entry Inductor did not write was deleted")
 	}
+}
+
+// A run says things from every goroutine it starts, so anything standing in for
+// Engine.Say has to serialise like the real one in cli.go does. Collecting the
+// output through this keeps a test from being the only unlocked writer.
+func sayInto() (func(string, ...any), func() string) {
+	var mu sync.Mutex
+	var out bytes.Buffer
+	return func(f string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			fmt.Fprintf(&out, f+"\n", args...)
+		}, func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return out.String()
+		}
 }

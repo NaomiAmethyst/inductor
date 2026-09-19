@@ -19,7 +19,7 @@ type Artifact struct {
 	Required    bool
 }
 
-var Graph = []Artifact{{"media", nil, "disk", "audio", 0, true}, {"transcript", []string{"media"}, "gpu", "audio", 0, true}, {"measurements", []string{"media"}, "cpu", "audio", 0, true}, {"voiceprint", []string{"media"}, "gpu", "audio", 0, false}, {"analysis", []string{"transcript"}, "api", "text", 0, true}, {"review", []string{"analysis", "measurements"}, "batch", "text", 150, true}, {"cover", []string{"review"}, "art", "text", 0, false}, {"entry", []string{"review", "measurements", "media"}, "disk", "audio", 0, true}}
+var Graph = []Artifact{{"media", nil, "disk", "audio", 0, true}, {"transcript", []string{"media"}, "gpu", "audio", 0, true}, {"measurements", []string{"media"}, "cpu", "audio", 0, true}, {"voiceprint", []string{"media"}, "gpu", "audio", 0, false}, {"sound", []string{"media"}, "gpu", "audio", 0, false}, {"analysis", []string{"transcript"}, "api", "text", 0, true}, {"review", []string{"analysis", "measurements", "sound"}, "batch", "text", 150, true}, {"cover", []string{"review"}, "art", "text", 0, false}, {"entry", []string{"review", "measurements", "media"}, "disk", "audio", 0, true}}
 
 func GraphOrder(graph []Artifact) ([]string, error) {
 	known := map[string]Artifact{}
@@ -171,13 +171,28 @@ func (p *artifactProbe) exists(name string, redo []string, overwrite bool) bool 
 	if name == "voiceprint" {
 		return exists(filepath.Join(e.Config.Cache, "voiceprints", fp+".json"))
 	}
+	if name == "sound" {
+		// Answering the producer's question, not its own. Listen declines
+		// outright when no models are configured, so probing the store would
+		// queue work that refuses to happen on every run for ever -- which is
+		// the same fault the cover predicate had, and shows the same way: not
+		// an error, a count that never falls.
+		cfg := e.Config.Transcribe.Sound
+		if cfg.Tagger == "" && cfg.Zeroshot == "" {
+			return true
+		}
+		return e.Sounds.Has(fp)
+	}
 	t, r := p.enrichment()
 	if t == nil {
 		return false
 	}
 	switch name {
 	case "analysis":
-		return truth(r["analysis"])
+		// Either a first pass exists, or one was declined for a reason that
+		// cannot change while the transcript is what it is. Both are settled;
+		// only the second used to be asked again every run.
+		return truth(r["analysis"]) || truth(r["analysis_declined"])
 	case "review":
 		return truth(r["final"])
 	case "cover":
@@ -220,7 +235,7 @@ type RunOptions struct {
 func (e *Engine) produce(ctx context.Context, name string, jobs []Planned, o RunOptions) []error {
 	errs := make([]error, len(jobs))
 	if name == "review" {
-		review, err := e.ReviewJobs(jobs, contains(o.Redo, "review"))
+		review, skipped, err := e.ReviewJobs(jobs, contains(o.Redo, "review"))
 		if err == nil {
 			_, err = e.RunReviews(ctx, review, 4, max(1, o.Batch), 60*time.Second, nil, o.WaitBatches)
 		}
@@ -228,10 +243,20 @@ func (e *Engine) produce(ctx context.Context, name string, jobs []Planned, o Run
 			if e.ArtifactExists("review", j, nil, false) {
 				continue
 			}
-			if err == nil {
-				errs[i] = fmt.Errorf("review produced no result")
-			} else {
+			id := ItemID(j.Source.AuthorID(), j.Stem)
+			if item := optionalYAML(j.Path); truth(item["id"]) {
+				id = str(item["id"])
+			}
+			switch {
+			case err != nil:
 				errs[i] = err
+			case skipped[id] != "":
+				// Declined, not failed. There is nothing on disk to write an
+				// entry from, and saying "review produced no result" about it
+				// buries the batches that genuinely did not come back.
+				errs[i] = NothingToProduce{skipped[id]}
+			default:
+				errs[i] = fmt.Errorf("review produced no result")
 			}
 		}
 		return errs
@@ -262,6 +287,10 @@ func (e *Engine) produce(ctx context.Context, name string, jobs []Planned, o Run
 		case "voiceprint":
 			if errs[i] = e.soundEnough(ctx, j); errs[i] == nil {
 				errs[i] = e.Transcribe(ctx, j, true, contains(o.Redo, name))
+			}
+		case "sound":
+			if errs[i] = e.soundEnough(ctx, j); errs[i] == nil {
+				errs[i] = e.Listen(ctx, j, contains(o.Redo, name))
 			}
 		case "measurements":
 			// The acoustics decode the file too, and a damaged one yields
@@ -305,7 +334,17 @@ func (e *Engine) saveResume(jobs []Planned, states []map[string]int) (string, er
 	for i, j := range jobs {
 		for _, a := range Graph {
 			if a.Required && states[i][a.Name] != 2 {
-				left = append(left, ItemID(j.Source.AuthorID(), j.Stem))
+				// The entry's *declared* id, because that is what a resume is
+				// matched against. The computed one agrees with it only while
+				// the filename has no author prefix of its own and no collision
+				// forced a suffix: a file named `<author>-<title>.mp3` under
+				// `<author>/` computes to `<author>-<author>-<title>`, names
+				// nothing, and takes the whole resume down with it.
+				id := ItemID(j.Source.AuthorID(), j.Stem)
+				if item := optionalYAML(j.Path); truth(item["id"]) {
+					id = str(item["id"])
+				}
+				left = append(left, id)
 				break
 			}
 		}
@@ -440,6 +479,7 @@ func (e *Engine) RunGraph(ctx context.Context, jobs []Planned, o RunOptions) (Re
 				if _, ok := err.(NothingToProduce); ok {
 					suffix = ":nothing"
 					status.Skipped++
+					states[i][ev.name] = 2
 				} else {
 					status.Failed++
 					e.Say("FAIL %s %s: %v", ev.name, jobs[i].Stem, err)

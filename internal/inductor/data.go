@@ -260,9 +260,40 @@ func writeJSON(p string, r any) error {
 var itemOrder = []string{"apiVersion", "kind", "id", "title", "author", "date", "audio", "video", "duration", "series", "series_index", "variant", "cover", "tags", "categories", "summary", "description", "source_url", "explicit", "needs", "spoilers", "provenance"}
 var authorOrder = []string{"apiVersion", "kind", "id", "name", "url", "image", "links", "summary", "description", "language", "explicit", "needs", "provenance"}
 
+// plainNumbers turns json.Number back into a number.
+//
+// Every cache here is decoded with UseNumber, which keeps an integer an integer
+// instead of letting it drift to a float on the way through JSON. The cost is
+// that json.Number is a *string* type, so yaml.v3 writes it quoted: a measured
+// figure lands in the document as `beat_hz: "8.05"`, and reading it back gives
+// a string. Nothing errors -- but the value no longer compares equal to the one
+// that produced it, so `equivalent` says the block has changed on every run and
+// the same measurements are rewritten across the library for ever. That showed
+// up exactly as it always does: a count that never falls.
+func plainNumbers(v any) any {
+	switch x := v.(type) {
+	case json.Number:
+		if i, e := x.Int64(); e == nil {
+			return i
+		}
+		if f, e := x.Float64(); e == nil {
+			return f
+		}
+		return x.String()
+	case map[string]any:
+		for k, e := range x {
+			x[k] = plainNumbers(e)
+		}
+	case []any:
+		for i, e := range x {
+			x[i] = plainNumbers(e)
+		}
+	}
+	return v
+}
 func yamlNode(v any) (*yaml.Node, error) {
 	n := &yaml.Node{}
-	if e := n.Encode(v); e != nil {
+	if e := n.Encode(plainNumbers(v)); e != nil {
 		return nil, e
 	}
 	return n, nil

@@ -58,7 +58,15 @@ func AttributeTree(c Config, redo, write bool) (Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := Record{"items": 0, "authors": 0, "unmatched": 0, "fields": 0, "claimed": 0}
+	out := Record{"items": 0, "authors": 0, "unmatched": 0, "fields": 0, "claimed": 0,
+		"nameplates": 0, "renamed_since": 0, "faces": 0, "unreadable_nameplates": 0}
+	// Which face each creator's artwork is set in, read once.
+	faces := map[string]Record{}
+	if pages, e := Documents(c.Content, "author"); e == nil {
+		for _, page := range pages {
+			faces[str(page.Data["id"])] = record(page.Data["cover_prompts"])
+		}
+	}
 	for _, d := range docs {
 		p := nested(d.Data, "provenance")
 		// Claim first, and for every entry: an item that already knows what was
@@ -73,6 +81,60 @@ func AttributeTree(c Config, redo, write bool) (Record, error) {
 			if write {
 				if _, err = SaveDocument(d.Path, d.Data); err != nil {
 					return out, err
+				}
+			}
+		}
+		// The title is painted onto a cover, so a picture drawn before that was
+		// recorded has no way of saying which title it shows -- and a retitle
+		// then leaves it announcing a name the entry no longer uses, with
+		// nothing able to notice. What it shows is knowable: the title the entry
+		// had when it was drawn, which is the one a retitle set aside, or the
+		// one it still has if it was never renamed.
+		//
+		// Where a picture was drawn *after* the rename this stamps the older
+		// name and the cover is redrawn once, needlessly. That is the direction
+		// to be wrong in: a wasted render costs a minute, and the other mistake
+		// leaves the wrong title on the shelf for good.
+		// The face a picture was set in, for pictures drawn before the face was
+		// recorded. It is knowable: the creator page names the font, and every
+		// cover under that creator was drawn with it. Stamping it lets the
+		// staleness test ask, per picture, whether that face would still be
+		// chosen for those particular words -- so the covers whose titles the
+		// face could draw are left alone and only the spoiled ones are redrawn.
+		if face := str(record(faces[authorOf(d)])["font"]); face != "" {
+			stamp := record(p["image_from"])
+			if _, ok := stamp["face"]; !ok && len(stamp) > 0 {
+				stamp["face"] = face
+				p["image_from"] = stamp
+				out["faces"] = integer(out["faces"]) + 1
+				if ChosenFace(face, str(first(d.Data["title"], d.Data["name"], d.Data["id"]))) != face {
+					out["unreadable_nameplates"] = integer(out["unreadable_nameplates"]) + 1
+				}
+				if write {
+					if _, err = SaveDocument(d.Path, d.Data); err != nil {
+						return out, err
+					}
+				}
+			}
+		}
+		if d.Kind == "item" && contains(texts(p["generated"]), "cover") {
+			stamp := record(p["image_from"])
+			if _, ok := stamp["nameplate"]; !ok {
+				if plate := str(first(p["original_title"], d.Data["title"])); plate != "" {
+					if stamp == nil {
+						stamp = Record{}
+					}
+					stamp["nameplate"] = plate
+					p["image_from"] = stamp
+					out["nameplates"] = integer(out["nameplates"]) + 1
+					if truth(p["original_title"]) {
+						out["renamed_since"] = integer(out["renamed_since"]) + 1
+					}
+					if write {
+						if _, err = SaveDocument(d.Path, d.Data); err != nil {
+							return out, err
+						}
+					}
 				}
 			}
 		}
@@ -486,4 +548,13 @@ func Migrate(c Config, dry bool) (Record, error) {
 	}
 	delete(report, "backup")
 	return report, nil
+}
+
+// authorOf is the creator an entry belongs to: an item names one, and a
+// creator page is one.
+func authorOf(d Document) string {
+	if d.Kind == "author" {
+		return str(d.Data["id"])
+	}
+	return str(d.Data["author"])
 }

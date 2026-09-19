@@ -42,3 +42,25 @@ func Unique(name string, taken map[string]bool) (string, error) {
 	}
 	return "", fmt.Errorf("could not find a free name for %q", name)
 }
+
+// StripControls removes the characters no font can draw and no reader wants.
+//
+// A control byte in a title survives everything: it is not whitespace, so it is
+// not trimmed; it is not punctuation, so it is not cleaned; and it slugs away to
+// nothing, so the filename looks fine. It shows up only at the far end, where
+// the nameplate renderer asks for a glyph, finds none in any face, and gives up
+// on the whole picture. One such title here -- a `\x04` in the middle of a word
+// -- reached the library from a rip and sat there through every pass.
+//
+// Tabs and newlines are removed rather than kept: a title is one line.
+func StripControls(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\t' || r == '\n' || r == '\r' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			return -1
+		}
+		return r
+	}, s)
+}

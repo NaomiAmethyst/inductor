@@ -292,8 +292,51 @@ func PlaceMedia(ctx context.Context, c Config, s *Source, stem string, repair bo
 		}
 	}
 	if work != "none" {
-		return ConvertMedia(ctx, src, target, work)
+		made, e := ConvertMedia(ctx, src, target, work)
+		if e != nil {
+			return "", e
+		}
+		// What was converted is the placement now, and anything else claiming
+		// this stem is what it replaced. Leaving the old one behind is not
+		// untidiness: PlacedAudio answers with whichever claimant sorts first,
+		// which is the .m4a, so a repair written as .mp3 landed *beside* the
+		// broken file and was never consulted. The recording stayed damaged,
+		// the check stayed unsatisfied, and the re-encode ran again on every
+		// run -- a count that never falls, and a broken file still being served.
+		supersede(filepath.Dir(target), stem, made, src)
+		return made, nil
 	}
 	_, e := Place(src, target, c.MediaSettings.Mode)
 	return target, e
+}
+
+// supersede removes the placements this repair replaces: same stem, same
+// directory, and demonstrably the same recording -- a link or a hardlink that
+// resolves to the very file just converted.
+//
+// Sameness is the whole guard. Two source records can land on one stem, and a
+// stem tells you nothing about which recording owns it, so removing siblings on
+// the strength of the name would take the other one's audio. A copy shares no
+// identity with its source and is therefore never swept; that leaves the repeat
+// in place for a library kept by copying, which is the safe way to be wrong.
+func supersede(dir, stem, keep, src string) {
+	origin, e := os.Stat(src)
+	if e != nil {
+		return
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		n := entry.Name()
+		if strings.TrimSuffix(n, filepath.Ext(n)) != stem ||
+			!contains(Playable, strings.ToLower(filepath.Ext(n))) {
+			continue
+		}
+		p := filepath.Join(dir, n)
+		if p == keep {
+			continue
+		}
+		if info, e := os.Stat(p); e == nil && os.SameFile(info, origin) {
+			_ = os.Remove(p)
+		}
+	}
 }
